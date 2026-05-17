@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 eframe = "0.34.2"
+egui-phosphor = "0.12.0"
+egui_extras = { version = "0.34.2", features = ["svg"] }
