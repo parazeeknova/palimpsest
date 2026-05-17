@@ -20,3 +20,6 @@ update:
 
 release-tag:
 	./scripts/tag-release.sh
+
+build:
+	cargo build --release

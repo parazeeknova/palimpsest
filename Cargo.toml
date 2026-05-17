@@ -2,6 +2,9 @@
 name = "palimpsest"
 version = "0.0.1"
 edition = "2024"
+description = "A git history visualizer"
+homepage = "https://github.com/parazeeknova/palimpsest"
+license-file = "LICENSE"
 
 [dependencies]
 eframe = "0.34.2"
@@ -9,3 +12,38 @@ egui-phosphor = "0.12.0"
 egui_extras = { version = "0.34.2", features = ["svg"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+
+[package.metadata.packager]
+product-name = "Palimpsest"
+identifier = "io.github.parazeeknova.palimpsest"
+category = "DeveloperTool"
+publisher = "parazeeknova"
+copyright = "Copyright 2024 parazeeknova"
+out-dir = "dist"
+
+binaries = [{ path = "palimpsest", main = true }]
+
+resources = [
+  "src/assets/*",
+]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+
+[package.metadata.packager.linux]
+depends = ["libgtk-3-0", "libxcb-render0", "libxcb-shape0", "libxcb-xfixes0", "libxkbcommon-x11-0"]
+
+[package.metadata.packager.deb]
+depends = ["libgtk-3-0", "libxcb-render0", "libxcb-shape0", "libxcb-xfixes0", "libxkbcommon-x11-0"]
+section = "devel"
+priority = "optional"
+
+[package.metadata.packager.appimage]
+bundle-media-framework = false
+
+[package.metadata.packager.windows]
+digest-algorithm = "sha256"
+
+[package.metadata.packager.nsis]
+install-mode = "currentUser"
+display-language-selector = true
