@@ -12,7 +12,7 @@ struct Tab<'a> {
     active: bool,
 }
 
-pub fn show(ui: &mut egui::Ui) {
+pub fn show(ui: &mut egui::Ui, repo_name: Option<&str>) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, TABBAR_HEIGHT), egui::Sense::hover());
 
@@ -25,39 +25,27 @@ pub fn show(ui: &mut egui::Ui) {
     ui.painter()
         .line_segment([rect.left_bottom(), rect.right_bottom()], stroke);
 
+    let tabs: Vec<Tab<'_>> = match repo_name {
+        Some(name) => vec![Tab {
+            title: name,
+            accent: None,
+            active: true,
+        }],
+        None => vec![],
+    };
+
+    if tabs.is_empty() {
+        let plus_rect =
+            egui::Rect::from_min_size(rect.left_top(), egui::vec2(PLUS_WIDTH, TABBAR_HEIGHT));
+        paint_plus(ui, plus_rect, stroke);
+        return;
+    }
+
     let plus_rect = egui::Rect::from_min_max(
         egui::pos2(rect.right() - PLUS_WIDTH, rect.top()),
         rect.right_bottom(),
     );
     let tabs_rect = egui::Rect::from_min_max(rect.left_top(), plus_rect.left_bottom());
-
-    let tabs = [
-        Tab {
-            title: "ForkWin",
-            accent: None,
-            active: false,
-        },
-        Tab {
-            title: "palimpsest*",
-            accent: Some(egui::Color32::from_rgb(199, 89, 220)),
-            active: true,
-        },
-        Tab {
-            title: "Bootstrap",
-            accent: None,
-            active: false,
-        },
-        Tab {
-            title: "Imgui",
-            accent: Some(egui::Color32::from_rgb(18, 159, 219)),
-            active: false,
-        },
-        Tab {
-            title: "WpfOfficeTheme",
-            accent: None,
-            active: false,
-        },
-    ];
 
     let mut left = tabs_rect.left();
     for (index, tab) in tabs.iter().enumerate() {

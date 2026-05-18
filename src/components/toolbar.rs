@@ -12,7 +12,7 @@ const ACTION_HEIGHT: f32 = 34.0;
 const LEFT_ACTIONS: f32 = QUICK_ACTION_WIDTH + ACTION_WIDTH * 4.0;
 const RIGHT_ACTIONS: f32 = ACTION_WIDTH * 6.0;
 
-pub fn show(ui: &mut egui::Ui) {
+pub fn show(ui: &mut egui::Ui, repo_name: Option<&str>) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, TOOLBAR_HEIGHT), egui::Sense::hover());
 
@@ -47,7 +47,7 @@ pub fn show(ui: &mut egui::Ui) {
         center_rect.shrink2(egui::vec2(8.0, 2.0)),
         "toolbar_center",
         egui::Layout::left_to_right(egui::Align::Center),
-        center_panel,
+        |ui| center_panel(ui, repo_name),
     );
     child_ui(
         ui,
@@ -104,7 +104,7 @@ fn left_panel(ui: &mut egui::Ui) {
     stash_button(ui);
 }
 
-fn center_panel(ui: &mut egui::Ui) {
+fn center_panel(ui: &mut egui::Ui, repo_name: Option<&str>) {
     let rect = ui.max_rect();
     let group_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(160.0, ACTION_HEIGHT));
     let icon_rect =
@@ -134,7 +134,8 @@ fn center_panel(ui: &mut egui::Ui) {
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-            ui.label(egui::RichText::new("palimpsest*").size(13.0).strong());
+            let label = repo_name.unwrap_or("no repository");
+            ui.label(egui::RichText::new(label).size(13.0).strong());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
                 ui.label(egui::RichText::new(GIT_BRANCH).size(11.0));

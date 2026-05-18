@@ -9,7 +9,7 @@ const HEADER_HEIGHT: f32 = 30.0;
 const ROW_HEIGHT: f32 = 24.0;
 const FILTER_HEIGHT: f32 = 26.0;
 
-pub fn show(ui: &mut egui::Ui) {
+pub fn show(ui: &mut egui::Ui, repo_name: Option<&str>) {
     let height = ui.available_height();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, height), egui::Sense::hover());
 
@@ -25,7 +25,7 @@ pub fn show(ui: &mut egui::Ui) {
         .line_segment([rect.right_top(), rect.right_bottom()], stroke);
 
     let mut y = rect.top();
-    paint_header(ui, rect, y, text, stroke);
+    paint_header(ui, rect, y, text, stroke, repo_name);
     y += HEADER_HEIGHT;
 
     paint_nav_row(ui, rect, y, FILE_TEXT, "Changes (5)", false, text, selected);
@@ -118,14 +118,16 @@ fn paint_header(
     y: f32,
     text: egui::Color32,
     stroke: egui::Stroke,
+    repo_name: Option<&str>,
 ) {
     let row = row_rect(rect, y, HEADER_HEIGHT);
     ui.painter()
         .line_segment([row.left_bottom(), row.right_bottom()], stroke);
+    let label = repo_name.unwrap_or("Open a repository");
     painter_text(
         ui,
         egui::pos2(row.left() + 18.0, row.center().y),
-        "palimpsest",
+        label,
         15.0,
         text,
         egui::Align2::LEFT_CENTER,
