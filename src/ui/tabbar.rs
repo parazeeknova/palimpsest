@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui_phosphor::regular::PLUS;
 
-use crate::sidebar::SIDEBAR_WIDTH;
+use crate::ui::sidebar::SIDEBAR_WIDTH;
 
 const TABBAR_HEIGHT: f32 = 25.0;
 const PLUS_WIDTH: f32 = 28.0;

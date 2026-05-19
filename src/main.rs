@@ -1,17 +1,14 @@
 use eframe::egui;
 use std::sync::Arc;
 
-mod components;
-mod logger;
-mod state;
-
-use components::{body, commit_panel, sidebar, tabbar, titlebar, toolbar};
-use logger::LogBuffer;
-use state::{AppAction, AppStore};
+use palimpsest::git::GitRepo;
+use palimpsest::logger::LogBuffer;
+use palimpsest::state::{AppAction, AppStore};
+use palimpsest::ui::{body, commit_panel, sidebar, tabbar, titlebar, toolbar};
 
 fn main() -> eframe::Result {
     let log_buffer = Arc::new(LogBuffer::new(1000));
-    logger::init(log_buffer.clone());
+    palimpsest::logger::init(log_buffer.clone());
 
     tracing::info!("Palimpsest starting up");
 
@@ -35,6 +32,7 @@ struct PalimpsestApp {
     titlebar_menu_open: bool,
     search_query: String,
     debug_open: bool,
+    git_repo: Option<GitRepo>,
     body_state: body::State,
     commit_panel_state: commit_panel::State,
 }
@@ -46,7 +44,7 @@ impl PalimpsestApp {
         cc.egui_ctx.set_fonts(fonts);
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
-        let store = state::create_store();
+        let store = palimpsest::state::create_store();
 
         tracing::info!("Application initialized");
 
@@ -56,13 +54,72 @@ impl PalimpsestApp {
             titlebar_menu_open: false,
             search_query: String::new(),
             debug_open: false,
+            git_repo: None,
             body_state: body::State::default(),
             commit_panel_state: commit_panel::State::default(),
         }
     }
 
     fn repo_name(&self) -> Option<String> {
-        self.store.get_state().repo_name().map(|s| s.to_owned())
+        self.git_repo
+            .as_ref()
+            .and_then(|r| r.repo_name())
+            .or_else(|| {
+                self.store.get_state().current_repo.as_deref().map(|p| {
+                    std::path::Path::new(p)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(p)
+                        .to_string()
+                })
+            })
+    }
+
+    fn open_repo(&mut self, path: &str) {
+        tracing::info!(repo = %path, "Opening repository");
+        match GitRepo::open(path) {
+            Ok(repo) => {
+                tracing::info!(repo_name = ?repo.repo_name(), "Repository opened successfully");
+                self.git_repo = Some(repo);
+                self.store.dispatch(AppAction::OpenRepo(path.to_string()));
+                self.refresh_git_data();
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to open repository");
+                self.git_repo = None;
+                self.store
+                    .dispatch(AppAction::SetRepoError(Some(e.to_string())));
+            }
+        }
+    }
+
+    fn refresh_git_data(&mut self) {
+        if let Some(repo) = &self.git_repo {
+            let commits = repo.commits(200).unwrap_or_default();
+            let branches = repo.branches().unwrap_or_default();
+            let remotes = repo.remotes().unwrap_or_default();
+            let tags = repo.tags().unwrap_or_default();
+            let status = repo
+                .status()
+                .unwrap_or(palimpsest::git::models::RepoStatus {
+                    branch: "HEAD".to_string(),
+                    staged_count: 0,
+                    unstaged_count: 0,
+                    staged_files: Vec::new(),
+                    additions: 0,
+                    deletions: 0,
+                    files_changed: 0,
+                });
+
+            self.store.dispatch(AppAction::RefreshGitData {
+                commits,
+                branches,
+                remotes,
+                tags,
+                status,
+            });
+            self.store.dispatch(AppAction::SetRepoError(None));
+        }
     }
 }
 
@@ -99,22 +156,25 @@ impl eframe::App for PalimpsestApp {
             titlebar::OpenAction::PickFolder => {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     let path = path.to_string_lossy().to_string();
-                    tracing::info!(repo = %path, "Opening repository");
-                    self.store.dispatch(AppAction::OpenRepo(path));
+                    self.open_repo(&path);
                 }
             }
             titlebar::OpenAction::SelectRecent(index) => {
-                let path = self.store.get_state().recent_repos.get(index).cloned();
-                if let Some(ref path) = path {
+                if let Some(path) = self.store.get_state().recent_repos.get(index).cloned() {
                     tracing::info!(repo = %path, "Selecting recent repository");
+                    self.open_repo(&path);
                 }
-                self.store.dispatch(AppAction::SelectRecent(index));
             }
             titlebar::OpenAction::None => {}
         }
 
+        if self.git_repo.is_some() && self.store.get_state().needs_refresh() {
+            self.refresh_git_data();
+        }
+
+        let state = self.store.get_state();
         let repo_name = self.repo_name();
-        toolbar::show(ui, repo_name.as_deref());
+        toolbar::show(ui, repo_name.as_deref(), self.git_repo.as_ref());
         tabbar::show(ui, repo_name.as_deref());
 
         let content_rect = ui.available_rect_before_wrap();
@@ -134,20 +194,49 @@ impl eframe::App for PalimpsestApp {
                 .id_salt("app_sidebar")
                 .max_rect(sidebar_rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| sidebar::show(ui, repo_name.as_deref()),
+            |ui| sidebar::show_cached(ui, repo_name.as_deref(), &state),
         );
         ui.scope_builder(
             egui::UiBuilder::new()
                 .id_salt("app_body")
                 .max_rect(body_rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
-            |ui| body::show(ui, &mut self.body_state, &mut self.commit_panel_state),
+            |ui| {
+                body::show_cached(
+                    ui,
+                    &mut self.body_state,
+                    &mut self.commit_panel_state,
+                    &state,
+                )
+            },
         );
+
+        if let Some(ref error) = state.repo_error {
+            show_error_banner(ui, error);
+        }
 
         if self.debug_open {
             show_debug_window(ui.ctx(), &self.log_buffer, &mut self.debug_open);
         }
     }
+}
+
+fn show_error_banner(ui: &egui::Ui, error: &str) {
+    let rect = ui.available_rect_before_wrap();
+    let banner_height = 40.0;
+    let banner_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.bottom() - banner_height),
+        egui::vec2(rect.width(), banner_height),
+    );
+    let bg = egui::Color32::from_rgb(60, 20, 20);
+    ui.painter().rect_filled(banner_rect, 0.0, bg);
+    ui.painter().text(
+        banner_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        error,
+        egui::FontId::proportional(12.0),
+        egui::Color32::LIGHT_RED,
+    );
 }
 
 fn show_debug_window(ctx: &egui::Context, log_buffer: &LogBuffer, open: &mut bool) {

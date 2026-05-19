@@ -2,7 +2,9 @@ use eframe::egui;
 use egui_phosphor::regular::{DOTS_SIX_VERTICAL, GITHUB_LOGO};
 use serde::Deserialize;
 
-use crate::components::commit_panel;
+use crate::git::GitRepo;
+use crate::state::AppState;
+use crate::ui::commit_panel;
 
 const HEADER_HEIGHT: f32 = 30.0;
 const ROW_HEIGHT: f32 = 24.0;
@@ -79,7 +81,12 @@ struct Columns {
     date: egui::Rect,
 }
 
-pub fn show(ui: &mut egui::Ui, state: &mut State, commit_panel_state: &mut commit_panel::State) {
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &mut State,
+    commit_panel_state: &mut commit_panel::State,
+    git_repo: Option<&GitRepo>,
+) {
     let rect = ui.available_rect_before_wrap();
     let (rect, _) = ui.allocate_exact_size(rect.size(), egui::Sense::hover());
 
@@ -108,7 +115,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut State, commit_panel_state: &mut commi
         rect.right_bottom(),
     );
 
-    let graph = CommitGraph::from_json(MOCK_COMMITS_JSON);
+    let graph = if let Some(repo) = git_repo {
+        if let Ok(commits) = repo.commits(200) {
+            CommitGraph::from_git(&commits)
+        } else {
+            CommitGraph::from_json(MOCK_COMMITS_JSON)
+        }
+    } else {
+        CommitGraph::from_json(MOCK_COMMITS_JSON)
+    };
 
     ui.scope_builder(
         egui::UiBuilder::new()
@@ -130,7 +145,85 @@ pub fn show(ui: &mut egui::Ui, state: &mut State, commit_panel_state: &mut commi
         },
     );
 
-    commit_panel::show(ui, rect, commit_panel_state);
+    let show_panel = git_repo.is_some_and(|repo| {
+        repo.status()
+            .map(|s| s.staged_count > 0 || s.unstaged_count > 0)
+            .unwrap_or(false)
+    });
+
+    if show_panel {
+        commit_panel::show(ui, rect, commit_panel_state, git_repo);
+    }
+}
+
+pub fn show_cached(
+    ui: &mut egui::Ui,
+    state: &mut State,
+    commit_panel_state: &mut commit_panel::State,
+    app_state: &AppState,
+) {
+    let rect = ui.available_rect_before_wrap();
+    let (rect, _) = ui.allocate_exact_size(rect.size(), egui::Sense::hover());
+
+    let bg = egui::Color32::from_rgb(31, 31, 31);
+    let header_bg = egui::Color32::from_rgb(37, 37, 37);
+    let stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(72, 72, 72));
+
+    ui.painter().rect_filled(rect, 0.0, bg);
+
+    let header_rect =
+        egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), HEADER_HEIGHT));
+    ui.painter()
+        .rect_filled(header_rect.expand2(egui::vec2(0.0, 1.0)), 0.0, header_bg);
+    ui.painter().line_segment(
+        [header_rect.left_bottom(), header_rect.right_bottom()],
+        stroke,
+    );
+
+    clamp_columns(state, rect.width());
+    let total_width = total_content_width(state).max(rect.width());
+    let columns = columns_for(header_rect, state, total_width);
+    paint_header(ui, header_rect, &columns, state, stroke);
+
+    let rows_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), header_rect.bottom()),
+        rect.right_bottom(),
+    );
+
+    let graph = if !app_state.cached_commits.is_empty() {
+        CommitGraph::from_cached(&app_state.cached_commits)
+    } else {
+        CommitGraph::from_json(MOCK_COMMITS_JSON)
+    };
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt("commit_body_scroll_host")
+            .max_rect(rows_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
+            egui::ScrollArea::both()
+                .id_salt("commit_body_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let content_size =
+                        egui::vec2(total_width, graph.commits.len() as f32 * ROW_HEIGHT);
+                    let (content_rect, _) =
+                        ui.allocate_exact_size(content_size, egui::Sense::hover());
+                    let columns = columns_for(content_rect, state, total_width);
+                    graph.paint_rows(ui, content_rect, &columns);
+                });
+        },
+    );
+
+    let show_panel = app_state
+        .cached_status
+        .as_ref()
+        .is_some_and(|s| s.staged_count > 0 || s.unstaged_count > 0);
+
+    if show_panel {
+        commit_panel::show_cached(ui, rect, commit_panel_state, app_state);
+    }
 }
 
 fn clamp_columns(state: &mut State, available_width: f32) {
@@ -256,6 +349,128 @@ impl CommitGraph {
             .into_iter()
             .map(Commit::from)
             .collect();
+        Self { commits }
+    }
+
+    fn from_git(commits: &[crate::git::Commit]) -> Self {
+        let branch_colors = [
+            egui::Color32::from_rgb(255, 165, 16),
+            egui::Color32::from_rgb(238, 202, 34),
+            egui::Color32::from_rgb(255, 45, 72),
+            egui::Color32::from_rgb(151, 113, 73),
+            egui::Color32::from_rgb(42, 167, 222),
+            egui::Color32::from_rgb(56, 193, 114),
+        ];
+        let mut lane_map = std::collections::HashMap::new();
+        let mut next_lane = 0;
+
+        let commits = commits
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let lane = if c.parents.len() <= 1 {
+                    0
+                } else {
+                    let key = c.hash.clone();
+                    let lane = lane_map.entry(key).or_insert_with(|| {
+                        let l = next_lane;
+                        next_lane += 1;
+                        l
+                    });
+                    *lane
+                };
+
+                let initials: String = c
+                    .author
+                    .split_whitespace()
+                    .take(2)
+                    .map(|w| {
+                        w.chars()
+                            .next()
+                            .unwrap_or('?')
+                            .to_uppercase()
+                            .next()
+                            .unwrap()
+                    })
+                    .collect();
+                let avatar_color = branch_colors[i % branch_colors.len()];
+                let date = format_commit_date(&c.timestamp);
+
+                Commit {
+                    lane,
+                    message: c.message.clone(),
+                    branch: None,
+                    author: c.author.clone(),
+                    initials,
+                    avatar: avatar_color,
+                    hash: c.short_hash.clone(),
+                    date,
+                    selected: i == 0,
+                }
+            })
+            .collect();
+
+        Self { commits }
+    }
+
+    fn from_cached(commits: &[crate::state::CachedCommit]) -> Self {
+        let branch_colors = [
+            egui::Color32::from_rgb(255, 165, 16),
+            egui::Color32::from_rgb(238, 202, 34),
+            egui::Color32::from_rgb(255, 45, 72),
+            egui::Color32::from_rgb(151, 113, 73),
+            egui::Color32::from_rgb(42, 167, 222),
+            egui::Color32::from_rgb(56, 193, 114),
+        ];
+        let mut lane_map = std::collections::HashMap::new();
+        let mut next_lane = 0;
+
+        let commits = commits
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let lane = if c.parents.len() <= 1 {
+                    0
+                } else {
+                    let key = c.hash.clone();
+                    let lane = lane_map.entry(key).or_insert_with(|| {
+                        let l = next_lane;
+                        next_lane += 1;
+                        l
+                    });
+                    *lane
+                };
+
+                let initials: String = c
+                    .author
+                    .split_whitespace()
+                    .take(2)
+                    .map(|w| {
+                        w.chars()
+                            .next()
+                            .unwrap_or('?')
+                            .to_uppercase()
+                            .next()
+                            .unwrap()
+                    })
+                    .collect();
+                let avatar_color = branch_colors[i % branch_colors.len()];
+                let date = format_commit_date_from_secs(c.timestamp_secs);
+
+                Commit {
+                    lane,
+                    message: c.message.clone(),
+                    branch: None,
+                    author: c.author.clone(),
+                    initials,
+                    avatar: avatar_color,
+                    hash: c.short_hash.clone(),
+                    date,
+                    selected: i == 0,
+                }
+            })
+            .collect();
+
         Self { commits }
     }
 
@@ -577,4 +792,46 @@ fn lane_color(lane: usize) -> egui::Color32 {
 
 fn lane_x(rect: egui::Rect, lane: usize) -> f32 {
     rect.left() + 14.0 + lane as f32 * 18.0
+}
+
+fn format_commit_date(time: &std::time::SystemTime) -> String {
+    let duration = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    format_commit_date_from_secs(secs as i64)
+}
+
+fn format_commit_date_from_secs(secs: i64) -> String {
+    let days = secs / 86400;
+    let months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut year = 1970;
+    let mut remaining = days;
+    loop {
+        let days_in_year = if year % 4 == 0 { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        year += 1;
+    }
+    let mut month = 0;
+    for (i, &days) in months.iter().enumerate() {
+        let d = if i == 1 && year % 4 == 0 { 29 } else { days };
+        if remaining < d {
+            month = i;
+            break;
+        }
+        remaining -= d;
+    }
+    const MONTH_NAMES: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let day = remaining + 1;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    format!(
+        "{} {} {} {:02}:{:02}",
+        day, MONTH_NAMES[month], year, hours, mins
+    )
 }

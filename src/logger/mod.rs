@@ -127,3 +127,66 @@ pub fn init(buffer: Arc<LogBuffer>) {
 
     Registry::default().with(ui_layer).with(fmt_layer).init();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_log_buffer_new() {
+        let buffer = LogBuffer::new(100);
+        assert!(buffer.entries().is_empty());
+    }
+
+    #[test]
+    fn test_log_buffer_push_and_entries() {
+        let buffer = LogBuffer::new(10);
+        buffer.push(LogEntry {
+            timestamp: "00:00:00".to_string(),
+            level: "INFO ".to_string(),
+            message: "test message".to_string(),
+        });
+        let entries = buffer.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "test message");
+    }
+
+    #[test]
+    fn test_log_buffer_clear() {
+        let buffer = LogBuffer::new(10);
+        buffer.push(LogEntry {
+            timestamp: "00:00:00".to_string(),
+            level: "INFO ".to_string(),
+            message: "test".to_string(),
+        });
+        buffer.clear();
+        assert!(buffer.entries().is_empty());
+    }
+
+    #[test]
+    fn test_log_buffer_max_entries() {
+        let buffer = LogBuffer::new(3);
+        for i in 0..5 {
+            buffer.push(LogEntry {
+                timestamp: "00:00:00".to_string(),
+                level: "INFO ".to_string(),
+                message: format!("msg {}", i),
+            });
+        }
+        let entries = buffer.entries();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].message, "msg 2");
+        assert_eq!(entries[2].message, "msg 4");
+    }
+
+    #[test]
+    fn test_log_entry_clone() {
+        let entry = LogEntry {
+            timestamp: "12:00:00".to_string(),
+            level: "ERROR".to_string(),
+            message: "something broke".to_string(),
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.message, entry.message);
+    }
+}
