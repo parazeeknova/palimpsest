@@ -718,12 +718,15 @@ fn paint_commit_line(
 }
 
 fn draw_commit_circle(ui: &egui::Ui, center_x: f32, center_y: f32, color: egui::Color32) {
-    ui.painter()
-        .circle_filled(egui::pos2(center_x, center_y), COMMIT_CIRCLE_RADIUS, color);
+    ui.painter().circle_filled(
+        egui::pos2(center_x, center_y),
+        COMMIT_CIRCLE_RADIUS,
+        egui::Color32::from_rgb(31, 31, 31),
+    );
     ui.painter().circle_stroke(
         egui::pos2(center_x, center_y),
         COMMIT_CIRCLE_RADIUS,
-        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(31, 31, 31)),
+        egui::Stroke::new(2.0_f32, color),
     );
 }
 
@@ -738,11 +741,12 @@ fn paint_commit_row(
     let text = ui.visuals().text_color();
     let muted = egui::Color32::from_rgb(184, 184, 184);
     let is_selected = state.selected_row == Some(row_idx);
+    let date_str = format_commit_date_from_secs(entry.data.timestamp_secs);
 
     draw_subject_cell(ui, row, columns.subject, entry, is_selected, text, muted);
     draw_author_cell(ui, row, columns.author, entry, text);
     cell_text(ui, columns.hash, row, &entry.data.short_hash, 13.0, text);
-    cell_text(ui, columns.date, row, &entry.data.message, 13.0, text);
+    cell_text(ui, columns.date, row, &date_str, 13.0, text);
 }
 
 fn draw_subject_cell(
@@ -755,12 +759,31 @@ fn draw_subject_cell(
     muted: egui::Color32,
 ) {
     let cell = row.intersect(column).shrink2(egui::vec2(8.0, 0.0));
+    let max_width = cell.width();
+    let font_id = egui::FontId::proportional(if is_selected { 14.0 } else { 13.0 });
+    let galley = ui
+        .painter()
+        .layout_no_wrap(entry.data.message.clone(), font_id, text);
+
+    let display_text = if galley.rect.width() > max_width {
+        let char_width = galley.rect.width() / entry.data.message.len().max(1) as f32;
+        let max_chars = ((max_width - 20.0) / char_width).floor() as usize;
+        let truncated = entry
+            .data
+            .message
+            .chars()
+            .take(max_chars.saturating_sub(3))
+            .collect::<String>();
+        format!("{}...", truncated)
+    } else {
+        entry.data.message.clone()
+    };
 
     clipped_text(
         ui,
         cell,
         egui::pos2(cell.left(), row.center().y),
-        &entry.data.message,
+        &display_text,
         if is_selected { 14.0 } else { 13.0 },
         if is_selected { text } else { muted },
         egui::Align2::LEFT_CENTER,
@@ -860,5 +883,39 @@ fn row_rect(content_rect: egui::Rect, index: usize) -> egui::Rect {
             content_rect.top() + index as f32 * ROW_HEIGHT,
         ),
         egui::vec2(content_rect.width(), ROW_HEIGHT),
+    )
+}
+
+fn format_commit_date_from_secs(secs: i64) -> String {
+    let days = secs / 86400;
+    let months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut year = 1970;
+    let mut remaining = days;
+    loop {
+        let days_in_year = if year % 4 == 0 { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        year += 1;
+    }
+    let mut month = 0;
+    for (i, &days) in months.iter().enumerate() {
+        let d = if i == 1 && year % 4 == 0 { 29 } else { days };
+        if remaining < d {
+            month = i;
+            break;
+        }
+        remaining -= d;
+    }
+    const MONTH_NAMES: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let day = remaining + 1;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    format!(
+        "{} {} {} {:02}:{:02}",
+        day, MONTH_NAMES[month], year, hours, mins
     )
 }
