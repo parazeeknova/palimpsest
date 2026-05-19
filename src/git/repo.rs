@@ -29,7 +29,6 @@ impl GitRepo {
         let head = self.repo.head()?;
         if head.is_branch() {
             let name = head.shorthand().unwrap_or("HEAD").to_string();
-            tracing::debug!(branch = %name, "Current head branch");
             Ok(name)
         } else {
             tracing::debug!("HEAD is detached");
@@ -38,7 +37,6 @@ impl GitRepo {
     }
 
     pub fn commits(&self, limit: usize) -> Result<Vec<Commit>, GitError> {
-        tracing::debug!(limit, "Fetching commits");
         let mut revwalk = self.repo.revwalk()?;
         revwalk.set_sorting(Sort::TOPOLOGICAL)?;
         revwalk.push_head()?;
@@ -57,7 +55,6 @@ impl GitRepo {
     }
 
     pub fn branches(&self) -> Result<Vec<Branch>, GitError> {
-        tracing::debug!("Fetching branches");
         let head_name = self.head_branch().ok();
 
         let mut branches = Vec::new();
@@ -101,7 +98,6 @@ impl GitRepo {
     }
 
     pub fn remotes(&self) -> Result<Vec<Remote>, GitError> {
-        tracing::debug!("Fetching remotes");
         let remotes = self.repo.remotes()?;
         let result: Vec<Remote> = remotes
             .iter()
@@ -121,7 +117,6 @@ impl GitRepo {
     }
 
     pub fn tags(&self) -> Result<Vec<Tag>, GitError> {
-        tracing::debug!("Fetching tags");
         let tags = self.repo.tag_names(None)?;
         let result: Vec<Tag> = tags
             .iter()
@@ -175,7 +170,6 @@ impl GitRepo {
     }
 
     pub fn status(&self) -> Result<RepoStatus, GitError> {
-        tracing::debug!("Fetching repository status");
         let branch = self.head_branch().unwrap_or_else(|_| "HEAD".to_string());
 
         let mut opts = StatusOptions::new();

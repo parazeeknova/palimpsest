@@ -4,111 +4,12 @@ use egui_phosphor::regular::{
     GITHUB_LOGO, LIST, MAGNIFYING_GLASS,
 };
 
-use crate::git::GitRepo;
 use crate::state::AppState;
 
 pub const SIDEBAR_WIDTH: f32 = 236.0;
 const HEADER_HEIGHT: f32 = 30.0;
 const ROW_HEIGHT: f32 = 24.0;
 const FILTER_HEIGHT: f32 = 26.0;
-
-#[allow(unused_assignments)]
-pub fn show(ui: &mut egui::Ui, repo_name: Option<&str>, git_repo: Option<&GitRepo>) {
-    let height = ui.available_height();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, height), egui::Sense::hover());
-
-    let bg = egui::Color32::from_rgb(39, 39, 39);
-    let selected = egui::Color32::from_rgb(66, 66, 66);
-    let stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(72, 72, 72));
-    let text = ui.visuals().text_color();
-    let muted = egui::Color32::from_rgb(165, 165, 165);
-    let blue = egui::Color32::from_rgb(28, 145, 220);
-
-    ui.painter().rect_filled(rect, 0.0, bg);
-    ui.painter()
-        .line_segment([rect.right_top(), rect.right_bottom()], stroke);
-
-    let mut y = rect.top();
-    paint_header(ui, rect, y, text, stroke, repo_name);
-    y += HEADER_HEIGHT;
-
-    paint_nav_row(ui, rect, y, FILE_TEXT, "Changes", false, text, selected);
-    y += ROW_HEIGHT;
-    paint_nav_row(ui, rect, y, LIST, "All Commits", true, text, selected);
-    y += ROW_HEIGHT;
-
-    paint_mode_bar(ui, rect, y, blue, muted, stroke);
-    y += 34.0;
-
-    paint_filter(ui, rect, y, muted, stroke);
-    y += FILTER_HEIGHT + 12.0;
-
-    if let Some(repo) = git_repo {
-        if let Ok(branches) = repo.branches() {
-            let local: Vec<_> = branches.iter().filter(|b| !b.is_remote).collect();
-            let remote: Vec<_> = branches.iter().filter(|b| b.is_remote).collect();
-
-            if !local.is_empty() {
-                paint_section(ui, rect, y, "Branches", text);
-                y += ROW_HEIGHT;
-                for branch in &local {
-                    let icon = if branch.is_current { CHECK } else { FOLDER };
-                    paint_tree_row(
-                        ui,
-                        rect,
-                        y,
-                        1,
-                        icon,
-                        &branch.name,
-                        branch.is_current,
-                        text,
-                        muted,
-                        None,
-                    );
-                    y += ROW_HEIGHT;
-                }
-            }
-
-            if !remote.is_empty() {
-                paint_section(ui, rect, y, "Remotes", text);
-                y += ROW_HEIGHT;
-                for branch in &remote {
-                    paint_tree_row(
-                        ui,
-                        rect,
-                        y,
-                        1,
-                        GITHUB_LOGO,
-                        &branch.name,
-                        false,
-                        text,
-                        muted,
-                        None,
-                    );
-                    y += ROW_HEIGHT;
-                }
-            }
-        }
-
-        if let Ok(remotes) = repo.remotes() {
-            if !remotes.is_empty() {
-                y += 4.0;
-            }
-        }
-
-        if let Ok(tags) = repo.tags() {
-            if !tags.is_empty() {
-                paint_collapsed_section(ui, rect, y, "Tags", text);
-                y += ROW_HEIGHT;
-            }
-        }
-    } else {
-        for title in ["Branches", "Remotes", "Tags", "Stashes", "Submodules"] {
-            paint_collapsed_section(ui, rect, y, title, text);
-            y += ROW_HEIGHT;
-        }
-    }
-}
 
 #[allow(unused_assignments)]
 pub fn show_cached(ui: &mut egui::Ui, repo_name: Option<&str>, app_state: &AppState) {

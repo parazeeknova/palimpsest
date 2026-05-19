@@ -203,13 +203,10 @@ impl eframe::App for PalimpsestApp {
             titlebar::OpenAction::None => {}
         }
 
-        if self.git_repo.is_some() && self.store.get_state().needs_refresh() {
-            self.refresh_git_data();
-        }
-
         let state = self.store.get_state();
         let repo_name = self.repo_name();
-        toolbar::show(ui, repo_name.as_deref(), self.git_repo.as_ref());
+        let current_branch = state.cached_status.as_ref().map(|s| s.branch.as_str());
+        toolbar::show(ui, repo_name.as_deref(), current_branch);
         tabbar::show(ui, repo_name.as_deref());
 
         let content_rect = ui.available_rect_before_wrap();

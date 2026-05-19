@@ -6,8 +6,6 @@ use zed::{Store, create_reducer};
 
 use crate::git::models::{Branch, Commit, Remote, RepoStatus, Tag};
 
-const REFRESH_INTERVAL_MS: u64 = 2000;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppState {
     pub current_repo: Option<String>,
@@ -118,19 +116,6 @@ impl AppState {
     fn with_current_repo(mut self, repo: Option<String>) -> Self {
         self.current_repo = repo;
         self
-    }
-
-    pub fn needs_refresh(&self) -> bool {
-        match self.last_refresh {
-            Some(last) => {
-                let now_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis();
-                now_ms.saturating_sub(last) >= REFRESH_INTERVAL_MS as u128
-            }
-            None => true,
-        }
     }
 
     pub fn mark_refreshed(mut self) -> Self {
@@ -410,12 +395,6 @@ mod tests {
         let state = store.get_state();
         assert!(state.current_repo.is_none());
         assert!(state.show_window_buttons);
-    }
-
-    #[test]
-    fn test_needs_refresh_initial() {
-        let state = AppState::default();
-        assert!(state.needs_refresh());
     }
 
     #[test]
