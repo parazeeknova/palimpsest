@@ -239,9 +239,13 @@ fn render_panel(
             .max_rect(footer_rect.shrink2(egui::vec2(CONTENT_PAD, 4.0)))
             .layout(egui::Layout::top_down(egui::Align::Min)),
         |ui| {
-            actions(ui, state, panel_rect);
+            actions(ui, state);
         },
     );
+
+    if state.show_discard_confirm {
+        show_discard_confirm(ui, panel_rect, state);
+    }
 }
 
 fn render_panel_cached(
@@ -381,9 +385,13 @@ fn render_panel_cached(
             .max_rect(footer_rect.shrink2(egui::vec2(CONTENT_PAD, 4.0)))
             .layout(egui::Layout::top_down(egui::Align::Min)),
         |ui| {
-            actions_cached(ui, state, panel_rect);
+            actions_cached(ui, state);
         },
     );
+
+    if state.show_discard_confirm {
+        show_discard_confirm(ui, panel_rect, state);
+    }
 }
 
 fn top_strip(ui: &mut egui::Ui, status: &crate::git::models::RepoStatus, muted: egui::Color32) {
@@ -1074,7 +1082,7 @@ fn truncate_path(path: &str, max_width: f32, font_size: f32) -> String {
     format!("…/…{}", truncated)
 }
 
-fn actions(ui: &mut egui::Ui, state: &mut State, panel_rect: egui::Rect) {
+fn actions(ui: &mut egui::Ui, state: &mut State) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
         ui.spacing_mut().interact_size = egui::vec2(0.0, 22.0);
@@ -1104,13 +1112,9 @@ fn actions(ui: &mut egui::Ui, state: &mut State, panel_rect: egui::Rect) {
             state.show_discard_confirm = true;
         }
     });
-
-    if state.show_discard_confirm {
-        show_discard_confirm(ui, panel_rect, state);
-    }
 }
 
-fn actions_cached(ui: &mut egui::Ui, state: &mut State, panel_rect: egui::Rect) {
+fn actions_cached(ui: &mut egui::Ui, state: &mut State) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
         ui.spacing_mut().interact_size = egui::vec2(0.0, 22.0);
@@ -1140,10 +1144,6 @@ fn actions_cached(ui: &mut egui::Ui, state: &mut State, panel_rect: egui::Rect) 
             state.show_discard_confirm = true;
         }
     });
-
-    if state.show_discard_confirm {
-        show_discard_confirm(ui, panel_rect, state);
-    }
 }
 
 fn show_discard_confirm(ui: &mut egui::Ui, panel_rect: egui::Rect, state: &mut State) {

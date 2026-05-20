@@ -435,24 +435,31 @@ impl GitRepo {
 
     pub fn unstage_file(&self, path: &str) -> Result<(), GitError> {
         let head_tree = self.repo.head()?.peel_to_tree()?;
-        let tree_entry = head_tree.get_path(std::path::Path::new(path))?;
         let mut index = self.repo.index()?;
         index.remove_path(std::path::Path::new(path))?;
-        let entry = git2::IndexEntry {
-            id: tree_entry.id(),
-            mode: tree_entry.filemode() as u32,
-            path: path.as_bytes().to_vec(),
-            ctime: git2::IndexTime::new(0, 0),
-            mtime: git2::IndexTime::new(0, 0),
-            dev: 0,
-            ino: 0,
-            uid: 0,
-            gid: 0,
-            file_size: 0,
-            flags: 0,
-            flags_extended: 0,
-        };
-        index.add(&entry)?;
+
+        match head_tree.get_path(std::path::Path::new(path)) {
+            Ok(tree_entry) => {
+                let entry = git2::IndexEntry {
+                    id: tree_entry.id(),
+                    mode: tree_entry.filemode() as u32,
+                    path: path.as_bytes().to_vec(),
+                    ctime: git2::IndexTime::new(0, 0),
+                    mtime: git2::IndexTime::new(0, 0),
+                    dev: 0,
+                    ino: 0,
+                    uid: 0,
+                    gid: 0,
+                    file_size: 0,
+                    flags: 0,
+                    flags_extended: 0,
+                };
+                index.add(&entry)?;
+            }
+            Err(e) if e.code() == git2::ErrorCode::NotFound => {}
+            Err(e) => return Err(GitError::from(e)),
+        }
+
         index.write()?;
         Ok(())
     }
