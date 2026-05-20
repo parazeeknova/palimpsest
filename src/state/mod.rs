@@ -67,11 +67,31 @@ pub struct CachedTag {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum CachedFileChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    TypeChanged,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CachedFileStatus {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub kind: CachedFileChangeKind,
+    pub staged: bool,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CachedRepoStatus {
     pub branch: String,
     pub staged_count: usize,
     pub unstaged_count: usize,
-    pub staged_files: Vec<String>,
+    pub staged_files: Vec<CachedFileStatus>,
+    pub unstaged_files: Vec<CachedFileStatus>,
     pub additions: usize,
     pub deletions: usize,
     pub files_changed: usize,
@@ -184,11 +204,27 @@ impl AppState {
     }
 
     pub fn with_cached_status(mut self, status: &RepoStatus) -> Self {
+        use crate::git::models::FileChangeKind;
+        let map_file = |f: &crate::git::models::FileStatus| CachedFileStatus {
+            path: f.path.clone(),
+            old_path: f.old_path.clone(),
+            kind: match f.kind {
+                FileChangeKind::Added => CachedFileChangeKind::Added,
+                FileChangeKind::Modified => CachedFileChangeKind::Modified,
+                FileChangeKind::Deleted => CachedFileChangeKind::Deleted,
+                FileChangeKind::Renamed => CachedFileChangeKind::Renamed,
+                FileChangeKind::TypeChanged => CachedFileChangeKind::TypeChanged,
+            },
+            staged: f.staged,
+            additions: f.additions,
+            deletions: f.deletions,
+        };
         self.cached_status = Some(CachedRepoStatus {
             branch: status.branch.clone(),
             staged_count: status.staged_count,
             unstaged_count: status.unstaged_count,
-            staged_files: status.staged_files.clone(),
+            staged_files: status.staged_files.iter().map(&map_file).collect(),
+            unstaged_files: status.unstaged_files.iter().map(&map_file).collect(),
             additions: status.additions,
             deletions: status.deletions,
             files_changed: status.files_changed,
@@ -221,6 +257,15 @@ pub enum AppAction {
     },
     ClearGitCache,
     SetRepoError(Option<String>),
+}
+
+#[derive(Clone, Debug)]
+pub enum CommitAction {
+    StageFile(String),
+    UnstageFile(String),
+    DiscardFile(String),
+    StageAll,
+    DiscardAll,
 }
 
 fn reducer(state: &AppState, action: &AppAction) -> AppState {

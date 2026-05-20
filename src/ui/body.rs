@@ -527,7 +527,15 @@ pub fn show_cached(
     commit_panel_state: &mut commit_panel::State,
     app_state: &AppState,
 ) {
-    if state.graph_data.commits.is_empty() || app_state.cached_commits.is_empty() {
+    let graph_commits_changed = state.graph_data.commits.len() != app_state.cached_commits.len()
+        || state
+            .graph_data
+            .commits
+            .iter()
+            .zip(app_state.cached_commits.iter())
+            .any(|(entry, cached)| entry.data.hash != cached.hash);
+
+    if graph_commits_changed {
         state.graph_data.clear();
         if !app_state.cached_commits.is_empty() {
             state.graph_data.add_commits(&app_state.cached_commits);
@@ -1056,7 +1064,7 @@ fn paint_ref_connector(
         return;
     };
 
-    let connector_color = color_for_ref(badge).linear_multiply(0.8);
+    let connector_color = color_for_ref(badge).linear_multiply(0.4);
     let commit_x = lane_center_x(graph_rect, commit_entry.lane);
     let row_center = (chip_rect.center().y * 2.0).round() / 2.0;
     let start_x = chip_rect.right() + 2.0;
@@ -1070,22 +1078,13 @@ fn paint_ref_connector(
         return;
     }
 
-    let available = end_x - start_x;
-    let dash_length = (available / 12.0).clamp(2.0, 4.0);
-    let gap_length = dash_length;
-    let mut current_x = start_x;
-
-    while current_x < end_x {
-        let next_x = (current_x + dash_length).min(end_x);
-        ui.painter().line_segment(
-            [
-                egui::pos2(current_x, row_center),
-                egui::pos2(next_x, row_center),
-            ],
-            egui::Stroke::new(1.0_f32, connector_color),
-        );
-        current_x = next_x + gap_length;
-    }
+    ui.painter().line_segment(
+        [
+            egui::pos2(start_x, row_center),
+            egui::pos2(end_x, row_center),
+        ],
+        egui::Stroke::new(1.0_f32, connector_color),
+    );
 }
 
 fn paint_ref_chip(ui: &mut egui::Ui, rect: egui::Rect, badge: &RefBadge, accent: egui::Color32) {

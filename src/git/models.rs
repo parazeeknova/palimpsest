@@ -2,6 +2,27 @@ use std::time::SystemTime;
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
+pub enum FileChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    TypeChanged,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct FileStatus {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub kind: FileChangeKind,
+    pub staged: bool,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
 pub struct Commit {
     pub hash: String,
     pub short_hash: String,
@@ -50,7 +71,8 @@ pub struct RepoStatus {
     pub branch: String,
     pub staged_count: usize,
     pub unstaged_count: usize,
-    pub staged_files: Vec<String>,
+    pub staged_files: Vec<FileStatus>,
+    pub unstaged_files: Vec<FileStatus>,
     pub additions: usize,
     pub deletions: usize,
     pub files_changed: usize,
@@ -124,6 +146,7 @@ mod tests {
             staged_count: 0,
             unstaged_count: 0,
             staged_files: vec![],
+            unstaged_files: vec![],
             additions: 0,
             deletions: 0,
             files_changed: 0,
@@ -138,7 +161,32 @@ mod tests {
             branch: "feature".to_string(),
             staged_count: 2,
             unstaged_count: 1,
-            staged_files: vec!["src/main.rs".to_string(), "Cargo.toml".to_string()],
+            staged_files: vec![
+                FileStatus {
+                    path: "src/main.rs".to_string(),
+                    old_path: None,
+                    kind: FileChangeKind::Modified,
+                    staged: true,
+                    additions: 30,
+                    deletions: 5,
+                },
+                FileStatus {
+                    path: "Cargo.toml".to_string(),
+                    old_path: None,
+                    kind: FileChangeKind::Added,
+                    staged: true,
+                    additions: 12,
+                    deletions: 0,
+                },
+            ],
+            unstaged_files: vec![FileStatus {
+                path: "README.md".to_string(),
+                old_path: None,
+                kind: FileChangeKind::Modified,
+                staged: false,
+                additions: 0,
+                deletions: 0,
+            }],
             additions: 42,
             deletions: 5,
             files_changed: 3,

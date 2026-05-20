@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use palimpsest::git::GitRepo;
 use palimpsest::logger::LogBuffer;
-use palimpsest::state::{AppAction, AppStore};
+use palimpsest::state::{AppAction, AppStore, CommitAction};
 use palimpsest::ui::{body, commit_panel, sidebar, tabbar, titlebar, toolbar};
 
 fn main() -> eframe::Result {
@@ -133,6 +133,7 @@ impl PalimpsestApp {
                         staged_count: 0,
                         unstaged_count: 0,
                         staged_files: Vec::new(),
+                        unstaged_files: Vec::new(),
                         additions: 0,
                         deletions: 0,
                         files_changed: 0,
@@ -153,6 +154,40 @@ impl PalimpsestApp {
             } else {
                 self.store
                     .dispatch(AppAction::SetRepoError(Some(errors.join("; "))));
+            }
+        }
+    }
+
+    fn handle_commit_action(&mut self, action: CommitAction) {
+        let Some(repo) = &self.git_repo else {
+            return;
+        };
+
+        match action {
+            CommitAction::StageFile(path) => {
+                if repo.stage_file(&path).is_ok() {
+                    self.refresh_git_data();
+                }
+            }
+            CommitAction::UnstageFile(path) => {
+                if repo.unstage_file(&path).is_ok() {
+                    self.refresh_git_data();
+                }
+            }
+            CommitAction::DiscardFile(path) => {
+                if repo.discard_file(&path).is_ok() {
+                    self.refresh_git_data();
+                }
+            }
+            CommitAction::StageAll => {
+                if repo.stage_all().is_ok() {
+                    self.refresh_git_data();
+                }
+            }
+            CommitAction::DiscardAll => {
+                if repo.discard_all().is_ok() {
+                    self.refresh_git_data();
+                }
             }
         }
     }
@@ -242,6 +277,10 @@ impl eframe::App for PalimpsestApp {
                 )
             },
         );
+
+        if let Some(action) = self.commit_panel_state.pending_action.take() {
+            self.handle_commit_action(action);
+        }
 
         if let Some(ref error) = state.repo_error {
             show_error_banner(ui, error);
