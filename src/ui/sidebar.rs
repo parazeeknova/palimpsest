@@ -1,15 +1,18 @@
 use eframe::egui;
 use egui_phosphor::regular::{
     CARET_DOWN, CARET_RIGHT, CHECK, EYE, FILE_TEXT, FOLDER, FUNNEL, GEAR_SIX, GIT_BRANCH,
-    GITHUB_LOGO, LIST, MAGNIFYING_GLASS, STAR,
+    GITHUB_LOGO, LIST, MAGNIFYING_GLASS,
 };
+
+use crate::state::AppState;
 
 pub const SIDEBAR_WIDTH: f32 = 236.0;
 const HEADER_HEIGHT: f32 = 30.0;
 const ROW_HEIGHT: f32 = 24.0;
 const FILTER_HEIGHT: f32 = 26.0;
 
-pub fn show(ui: &mut egui::Ui) {
+#[allow(unused_assignments)]
+pub fn show_cached(ui: &mut egui::Ui, repo_name: Option<&str>, app_state: &AppState) {
     let height = ui.available_height();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, height), egui::Sense::hover());
 
@@ -25,10 +28,10 @@ pub fn show(ui: &mut egui::Ui) {
         .line_segment([rect.right_top(), rect.right_bottom()], stroke);
 
     let mut y = rect.top();
-    paint_header(ui, rect, y, text, stroke);
+    paint_header(ui, rect, y, text, stroke, repo_name);
     y += HEADER_HEIGHT;
 
-    paint_nav_row(ui, rect, y, FILE_TEXT, "Changes (5)", false, text, selected);
+    paint_nav_row(ui, rect, y, FILE_TEXT, "Changes", false, text, selected);
     y += ROW_HEIGHT;
     paint_nav_row(ui, rect, y, LIST, "All Commits", true, text, selected);
     y += ROW_HEIGHT;
@@ -39,76 +42,72 @@ pub fn show(ui: &mut egui::Ui) {
     paint_filter(ui, rect, y, muted, stroke);
     y += FILTER_HEIGHT + 12.0;
 
-    paint_section(ui, rect, y, "Starred", text);
-    y += ROW_HEIGHT;
-    paint_tree_row(
-        ui,
-        rect,
-        y,
-        1,
-        CHECK,
-        "master",
-        true,
-        text,
-        muted,
-        Some((STAR, blue)),
-    );
-    y += ROW_HEIGHT;
+    if app_state.current_repo.is_some() {
+        let local: Vec<_> = app_state
+            .cached_branches
+            .iter()
+            .filter(|b| !b.is_remote)
+            .collect();
+        let remote: Vec<_> = app_state
+            .cached_branches
+            .iter()
+            .filter(|b| b.is_remote)
+            .collect();
 
-    paint_section(ui, rect, y, "Branches", text);
-    y += ROW_HEIGHT;
-    for folder in ["aozgaa", "dev", "lego", "rbuckton"] {
-        paint_tree_row(ui, rect, y, 1, FOLDER, folder, false, text, muted, None);
-        y += ROW_HEIGHT;
-    }
-    paint_tree_row(ui, rect, y, 1, CHECK, "master", true, text, muted, None);
-    y += ROW_HEIGHT;
-    paint_tree_row(
-        ui,
-        rect,
-        y,
-        1,
-        GIT_BRANCH,
-        "persistentResolutions",
-        false,
-        text,
-        muted,
-        None,
-    );
-    y += ROW_HEIGHT;
-    paint_tree_row(
-        ui,
-        rect,
-        y,
-        1,
-        GIT_BRANCH,
-        "release-4.1",
-        false,
-        text,
-        muted,
-        None,
-    );
-    y += ROW_HEIGHT;
+        if !local.is_empty() {
+            paint_section(ui, rect, y, "Branches", text);
+            y += ROW_HEIGHT;
+            for branch in &local {
+                let icon = if branch.is_current { CHECK } else { FOLDER };
+                paint_tree_row(
+                    ui,
+                    rect,
+                    y,
+                    1,
+                    icon,
+                    &branch.name,
+                    branch.is_current,
+                    text,
+                    muted,
+                    None,
+                );
+                y += ROW_HEIGHT;
+            }
+        }
 
-    paint_section(ui, rect, y, "Remotes", text);
-    y += ROW_HEIGHT;
-    paint_tree_row(
-        ui,
-        rect,
-        y,
-        1,
-        GITHUB_LOGO,
-        "origin",
-        false,
-        text,
-        muted,
-        None,
-    );
-    y += ROW_HEIGHT;
+        if !remote.is_empty() {
+            paint_section(ui, rect, y, "Remotes", text);
+            y += ROW_HEIGHT;
+            for branch in &remote {
+                paint_tree_row(
+                    ui,
+                    rect,
+                    y,
+                    1,
+                    GITHUB_LOGO,
+                    &branch.name,
+                    false,
+                    text,
+                    muted,
+                    None,
+                );
+                y += ROW_HEIGHT;
+            }
+        }
 
-    for title in ["Tags", "Stashes", "Submodules"] {
-        paint_collapsed_section(ui, rect, y, title, text);
-        y += ROW_HEIGHT;
+        if !app_state.cached_remotes.is_empty() {
+            y += 4.0;
+        }
+
+        if !app_state.cached_tags.is_empty() {
+            paint_collapsed_section(ui, rect, y, "Tags", text);
+            y += ROW_HEIGHT;
+        }
+    } else {
+        for title in ["Branches", "Remotes", "Tags", "Stashes", "Submodules"] {
+            paint_collapsed_section(ui, rect, y, title, text);
+            y += ROW_HEIGHT;
+        }
     }
 }
 
@@ -118,14 +117,16 @@ fn paint_header(
     y: f32,
     text: egui::Color32,
     stroke: egui::Stroke,
+    repo_name: Option<&str>,
 ) {
     let row = row_rect(rect, y, HEADER_HEIGHT);
     ui.painter()
         .line_segment([row.left_bottom(), row.right_bottom()], stroke);
+    let label = repo_name.unwrap_or("Open a repository");
     painter_text(
         ui,
         egui::pos2(row.left() + 18.0, row.center().y),
-        "palimpsest",
+        label,
         15.0,
         text,
         egui::Align2::LEFT_CENTER,
