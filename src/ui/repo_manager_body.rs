@@ -1,6 +1,7 @@
 use eframe::egui;
 use egui_phosphor::regular::{
-    BOOKMARK, CARET_DOWN, CARET_RIGHT, GIT_BRANCH, GIT_COMMIT, GITHUB_LOGO,
+    ARROW_SQUARE_OUT, BOOKMARK, CARET_DOWN, CARET_RIGHT, FOLDER, GIT_BRANCH, GIT_COMMIT,
+    GITHUB_LOGO,
 };
 
 use crate::state::{AppState, ManagerRepoDetails};
@@ -40,7 +41,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut State, app_state: &AppState) -> Optio
     if let Some(open_path) = paint_top_bar(ui, rect, y, details) {
         return Some(open_path);
     }
-    y += 44.0;
+    y += 56.0;
     y += SECTION_GAP;
 
     y = paint_stats_panel(ui, rect, y, details);
@@ -93,40 +94,79 @@ fn paint_top_bar(
     y: f32,
     details: &ManagerRepoDetails,
 ) -> Option<String> {
-    let row_height = 44.0;
+    let row_height = 56.0;
     let row = egui::Rect::from_min_size(
         egui::pos2(rect.left() + 16.0, y),
         egui::vec2(rect.width() - 32.0, row_height),
     );
 
     ui.painter().text(
-        egui::pos2(row.left(), row.center().y),
-        egui::Align2::LEFT_CENTER,
+        egui::pos2(row.left(), row.top() + 16.0),
+        egui::Align2::LEFT_TOP,
         &details.repo_name,
-        egui::FontId::proportional(15.0),
+        egui::FontId::proportional(18.0),
         ui.visuals().text_color(),
     );
 
+    let path_y = row.top() + 36.0;
     ui.painter().text(
-        egui::pos2(row.left(), row.center().y + 16.0),
+        egui::pos2(row.left(), path_y),
         egui::Align2::LEFT_CENTER,
         &details.repo_path,
         egui::FontId::proportional(11.0),
         egui::Color32::from_rgb(140, 140, 140),
     );
 
+    let explorer_btn_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            row.left() + details.repo_path.len() as f32 * 5.5 + 8.0,
+            path_y - 8.0,
+        ),
+        egui::vec2(20.0, 16.0),
+    );
+    ui.painter().text(
+        explorer_btn_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        FOLDER,
+        egui::FontId::proportional(12.0),
+        egui::Color32::from_rgb(140, 140, 140),
+    );
+    let explorer_resp = ui.interact(
+        explorer_btn_rect,
+        ui.make_persistent_id("manager_explorer_btn"),
+        egui::Sense::click(),
+    );
+    if explorer_resp.clicked() {
+        let _ = std::process::Command::new(if cfg!(target_os = "windows") {
+            "explorer"
+        } else if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        })
+        .arg(&details.repo_path)
+        .spawn();
+    }
+
     let open_btn_rect = egui::Rect::from_min_size(
-        egui::pos2(row.right() - 70.0, row.top() + 5.0),
-        egui::vec2(60.0, 28.0),
+        egui::pos2(row.right() - 80.0, row.top() + 14.0),
+        egui::vec2(70.0, 28.0),
     );
     ui.painter()
-        .rect_filled(open_btn_rect, 4.0, egui::Color32::from_rgb(76, 167, 255));
+        .rect_filled(open_btn_rect, 4.0, egui::Color32::from_rgb(62, 62, 62));
     ui.painter().text(
-        open_btn_rect.center(),
+        egui::pos2(open_btn_rect.left() + 14.0, open_btn_rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        ARROW_SQUARE_OUT,
+        egui::FontId::proportional(12.0),
+        ui.visuals().text_color(),
+    );
+    ui.painter().text(
+        egui::pos2(open_btn_rect.left() + 32.0, open_btn_rect.center().y),
         egui::Align2::CENTER_CENTER,
         "Open",
         egui::FontId::proportional(12.0),
-        egui::Color32::WHITE,
+        ui.visuals().text_color(),
     );
 
     let response = ui.interact(
