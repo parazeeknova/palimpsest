@@ -7,7 +7,7 @@ use zed::{Store, create_reducer};
 
 use crate::git::models::{Branch, Commit, Remote, RepoStatus, Tag};
 
-const SESSION_VERSION: u32 = 1;
+const SESSION_VERSION: u32 = 2;
 const SESSION_FILE_NAME: &str = "session.json";
 const APP_ID: &str = "Palimpsest";
 
@@ -77,6 +77,8 @@ impl AppSession {
             cached_status: None,
             last_refresh: None,
             repo_error: None,
+            manager_selected_repo: None,
+            manager_details: None,
         }
     }
 
@@ -149,6 +151,8 @@ pub struct AppState {
     pub cached_status: Option<CachedRepoStatus>,
     pub last_refresh: Option<u128>,
     pub repo_error: Option<String>,
+    pub manager_selected_repo: Option<String>,
+    pub manager_details: Option<ManagerRepoDetails>,
 }
 
 impl PartialEq for AppState {
@@ -165,6 +169,8 @@ impl PartialEq for AppState {
             && self.cached_status == other.cached_status
             && self.last_refresh == other.last_refresh
             && self.repo_error == other.repo_error
+            && self.manager_selected_repo == other.manager_selected_repo
+            && self.manager_details == other.manager_details
     }
 }
 
@@ -230,6 +236,50 @@ pub struct CachedRepoStatus {
     pub files_changed: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ManagerRepoDetails {
+    pub repo_path: String,
+    pub repo_name: String,
+    pub branch: String,
+    pub uncommitted_files: usize,
+    pub total_commits: usize,
+    pub initial_commit_date: String,
+    pub last_commit_date: String,
+    pub remotes: Vec<ManagerRemote>,
+    pub branches: Vec<ManagerBranch>,
+    pub tags: Vec<ManagerTag>,
+    pub commits: Vec<ManagerCommit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ManagerRemote {
+    pub name: String,
+    pub url: String,
+    pub is_github: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ManagerBranch {
+    pub name: String,
+    pub last_message: String,
+    pub author: String,
+    pub relative_date: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ManagerTag {
+    pub name: String,
+    pub author: String,
+    pub relative_date: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ManagerCommit {
+    pub message: String,
+    pub author: String,
+    pub relative_date: String,
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
@@ -245,6 +295,8 @@ impl Default for AppState {
             cached_status: None,
             last_refresh: None,
             repo_error: None,
+            manager_selected_repo: None,
+            manager_details: None,
         }
     }
 }
@@ -448,6 +500,9 @@ pub enum AppAction {
     },
     ClearGitCache,
     SetRepoError(Option<String>),
+    SelectManagerRepo(Option<String>),
+    SetManagerDetails(Option<ManagerRepoDetails>),
+    RemoveRecentRepo(String),
 }
 
 #[derive(Clone, Debug)]
@@ -484,6 +539,8 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
             cached_status: state.cached_status.clone(),
             last_refresh: state.last_refresh,
             repo_error: state.repo_error.clone(),
+            manager_selected_repo: state.manager_selected_repo.clone(),
+            manager_details: state.manager_details.clone(),
         },
         AppAction::RefreshGitData {
             commits,
@@ -513,6 +570,69 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
             cached_status: state.cached_status.clone(),
             last_refresh: state.last_refresh,
             repo_error: error.clone(),
+            manager_selected_repo: state.manager_selected_repo.clone(),
+            manager_details: state.manager_details.clone(),
+        },
+        AppAction::SelectManagerRepo(path) => AppState {
+            open_tabs: state.open_tabs.clone(),
+            active_tab: state.active_tab,
+            current_repo: state.current_repo.clone(),
+            recent_repos: state.recent_repos.clone(),
+            show_window_buttons: state.show_window_buttons,
+            cached_commits: state.cached_commits.clone(),
+            cached_branches: state.cached_branches.clone(),
+            cached_remotes: state.cached_remotes.clone(),
+            cached_tags: state.cached_tags.clone(),
+            cached_status: state.cached_status.clone(),
+            last_refresh: state.last_refresh,
+            repo_error: state.repo_error.clone(),
+            manager_selected_repo: path.clone(),
+            manager_details: None,
+        },
+        AppAction::SetManagerDetails(details) => AppState {
+            open_tabs: state.open_tabs.clone(),
+            active_tab: state.active_tab,
+            current_repo: state.current_repo.clone(),
+            recent_repos: state.recent_repos.clone(),
+            show_window_buttons: state.show_window_buttons,
+            cached_commits: state.cached_commits.clone(),
+            cached_branches: state.cached_branches.clone(),
+            cached_remotes: state.cached_remotes.clone(),
+            cached_tags: state.cached_tags.clone(),
+            cached_status: state.cached_status.clone(),
+            last_refresh: state.last_refresh,
+            repo_error: state.repo_error.clone(),
+            manager_selected_repo: state.manager_selected_repo.clone(),
+            manager_details: details.clone(),
+        },
+        AppAction::RemoveRecentRepo(path) => AppState {
+            open_tabs: state.open_tabs.clone(),
+            active_tab: state.active_tab,
+            current_repo: state.current_repo.clone(),
+            recent_repos: state
+                .recent_repos
+                .iter()
+                .filter(|r| r.as_str() != path.as_str())
+                .cloned()
+                .collect(),
+            show_window_buttons: state.show_window_buttons,
+            cached_commits: state.cached_commits.clone(),
+            cached_branches: state.cached_branches.clone(),
+            cached_remotes: state.cached_remotes.clone(),
+            cached_tags: state.cached_tags.clone(),
+            cached_status: state.cached_status.clone(),
+            last_refresh: state.last_refresh,
+            repo_error: state.repo_error.clone(),
+            manager_selected_repo: if state.manager_selected_repo.as_deref() == Some(path) {
+                None
+            } else {
+                state.manager_selected_repo.clone()
+            },
+            manager_details: if state.manager_selected_repo.as_deref() == Some(path) {
+                None
+            } else {
+                state.manager_details.clone()
+            },
         },
     }
 }
