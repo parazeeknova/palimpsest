@@ -64,6 +64,15 @@ pub fn github_links(url: &str) -> Option<(String, String, String)> {
     ))
 }
 
+pub fn parse_tag_version(tag: &str) -> (u64, u64, u64) {
+    let stripped = tag.strip_prefix('v').unwrap_or(tag);
+    let mut parts = stripped.split('.');
+    let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (major, minor, patch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

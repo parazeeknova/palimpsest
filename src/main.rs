@@ -95,12 +95,17 @@ impl PalimpsestApp {
     }
 
     fn restore_active_repo_from_state(&mut self) {
-        let Some(path) = self.store.get_state().current_repo.clone() else {
-            return;
-        };
-
-        if self.git_repo.is_none() {
-            self.open_repo(&path);
+        let state = self.store.get_state();
+        if state.current_repo.is_some() {
+            let path = state.current_repo.clone().unwrap();
+            if self.git_repo.is_none() {
+                self.open_repo(&path);
+            }
+        } else if !state.recent_repos.is_empty() {
+            let first_recent = state.recent_repos[0].clone();
+            self.store
+                .dispatch(AppAction::SelectManagerRepo(Some(first_recent.clone())));
+            self.fetch_manager_details(&first_recent);
         }
     }
 
@@ -302,7 +307,7 @@ impl PalimpsestApp {
         use palimpsest::state::{
             ManagerBranch, ManagerCommit, ManagerRemote, ManagerRepoDetails, ManagerTag,
         };
-        use palimpsest::ui::repo_manager::format_relative_time;
+        use palimpsest::ui::repo_manager::{format_relative_time, parse_tag_version};
 
         match GitRepo::open(path) {
             Ok(repo) => {
@@ -375,7 +380,12 @@ impl PalimpsestApp {
                     })
                     .collect();
 
-                let tags = repo.tags().unwrap_or_default();
+                let mut tags = repo.tags().unwrap_or_default();
+                tags.sort_by(|a, b| {
+                    let va = parse_tag_version(&a.name);
+                    let vb = parse_tag_version(&b.name);
+                    vb.cmp(&va)
+                });
                 let manager_tags: Vec<ManagerTag> = tags
                     .iter()
                     .take(5)
