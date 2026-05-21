@@ -127,9 +127,12 @@ impl GitRepo {
             .map(|name| {
                 let oid = self.repo.revparse_single(&format!("refs/tags/{}", name))?;
                 let target = oid.peel_to_commit()?;
+                let author = target.author();
                 Ok(Tag {
                     name: name.to_string(),
                     target_hash: target.id().to_string()[..7].to_string(),
+                    author: author.name().unwrap_or("Unknown").to_string(),
+                    timestamp: secs_to_system_time(author.when().seconds()),
                 })
             })
             .collect::<Result<Vec<_>, git2::Error>>()?;

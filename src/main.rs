@@ -392,24 +392,15 @@ impl PalimpsestApp {
                 let manager_tags: Vec<ManagerTag> = tags
                     .iter()
                     .take(5)
-                    .map(|t| {
-                        let target_commit = commits.iter().find(|c| {
-                            c.hash.starts_with(&t.target_hash) || c.short_hash == t.target_hash
-                        });
-                        ManagerTag {
-                            name: t.name.clone(),
-                            author: target_commit.map(|c| c.author.clone()).unwrap_or_default(),
-                            relative_date: target_commit
-                                .map(|c| {
-                                    format_relative_time(
-                                        c.timestamp
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs() as i64)
-                                            .unwrap_or(0),
-                                    )
-                                })
-                                .unwrap_or_default(),
-                        }
+                    .map(|t| ManagerTag {
+                        name: t.name.clone(),
+                        author: t.author.clone(),
+                        relative_date: format_relative_time(
+                            t.timestamp
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0),
+                        ),
                     })
                     .collect();
 

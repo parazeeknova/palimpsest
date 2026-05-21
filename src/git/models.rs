@@ -55,6 +55,8 @@ pub struct Remote {
 pub struct Tag {
     pub name: String,
     pub target_hash: String,
+    pub author: String,
+    pub timestamp: SystemTime,
 }
 
 #[allow(dead_code)]
@@ -125,6 +127,8 @@ mod tests {
         let tag = Tag {
             name: "v1.0.0".to_string(),
             target_hash: "abc123".to_string(),
+            author: "Test Author".to_string(),
+            timestamp: SystemTime::UNIX_EPOCH,
         };
         assert_eq!(tag.name, "v1.0.0");
     }
