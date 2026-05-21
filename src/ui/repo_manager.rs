@@ -63,3 +63,91 @@ pub fn github_links(url: &str) -> Option<(String, String, String)> {
         format!("{}/pulls", base),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_relative_time_just_now() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(format_relative_time(now), "just now");
+    }
+
+    #[test]
+    fn test_format_relative_time_minutes() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let five_min_ago = now - 300;
+        assert_eq!(format_relative_time(five_min_ago), "5 minutes ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_hours() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let three_hours_ago = now - 10800;
+        assert_eq!(format_relative_time(three_hours_ago), "3 hours ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_days() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let two_days_ago = now - 172800;
+        assert_eq!(format_relative_time(two_days_ago), "2 days ago");
+    }
+
+    #[test]
+    fn test_format_relative_time_months() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let seven_months_ago = now - 18144000;
+        assert_eq!(format_relative_time(seven_months_ago), "7 months ago");
+    }
+
+    #[test]
+    fn test_is_github_url_true() {
+        assert!(is_github_url("https://github.com/user/repo"));
+        assert!(is_github_url("git@github.com:user/repo.git"));
+    }
+
+    #[test]
+    fn test_is_github_url_false() {
+        assert!(!is_github_url("https://gitlab.com/user/repo"));
+        assert!(!is_github_url("https://bitbucket.org/user/repo"));
+    }
+
+    #[test]
+    fn test_github_links_returns_some() {
+        let links = github_links("https://github.com/user/repo");
+        assert!(links.is_some());
+        let (base, issues, pulls) = links.unwrap();
+        assert_eq!(base, "https://github.com/user/repo");
+        assert_eq!(issues, "https://github.com/user/repo/issues");
+        assert_eq!(pulls, "https://github.com/user/repo/pulls");
+    }
+
+    #[test]
+    fn test_github_links_strips_git_extension() {
+        let links = github_links("https://github.com/user/repo.git");
+        let (base, _, _) = links.unwrap();
+        assert_eq!(base, "https://github.com/user/repo");
+    }
+
+    #[test]
+    fn test_github_links_returns_none_for_non_github() {
+        assert!(github_links("https://gitlab.com/user/repo").is_none());
+    }
+}

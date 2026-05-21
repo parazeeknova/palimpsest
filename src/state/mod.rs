@@ -806,4 +806,162 @@ mod tests {
         assert!(cleared.cached_branches.is_empty());
         assert!(cleared.last_refresh.is_none());
     }
+
+    #[test]
+    fn test_select_manager_repo_sets_selection() {
+        let state = AppState {
+            recent_repos: vec!["/repo1".to_string(), "/repo2".to_string()],
+            ..Default::default()
+        };
+        let result = reducer(
+            &state,
+            &AppAction::SelectManagerRepo(Some("/repo1".to_string())),
+        );
+        assert_eq!(result.manager_selected_repo, Some("/repo1".to_string()));
+        assert!(result.manager_details.is_none());
+    }
+
+    #[test]
+    fn test_select_manager_repo_none_clears_selection() {
+        let details = ManagerRepoDetails {
+            repo_path: "/repo1".to_string(),
+            repo_name: "repo1".to_string(),
+            branch: "main".to_string(),
+            uncommitted_files: 0,
+            total_commits: 10,
+            initial_commit_date: "1 year ago".to_string(),
+            last_commit_date: "1 day ago".to_string(),
+            remotes: vec![],
+            branches: vec![],
+            tags: vec![],
+            commits: vec![],
+        };
+        let state = AppState {
+            manager_selected_repo: Some("/repo1".to_string()),
+            manager_details: Some(details),
+            ..Default::default()
+        };
+        let result = reducer(&state, &AppAction::SelectManagerRepo(None));
+        assert!(result.manager_selected_repo.is_none());
+        assert!(result.manager_details.is_none());
+    }
+
+    #[test]
+    fn test_set_manager_details_populates_details() {
+        let details = ManagerRepoDetails {
+            repo_path: "/repo1".to_string(),
+            repo_name: "repo1".to_string(),
+            branch: "main".to_string(),
+            uncommitted_files: 3,
+            total_commits: 42,
+            initial_commit_date: "6 months ago".to_string(),
+            last_commit_date: "2 hours ago".to_string(),
+            remotes: vec![ManagerRemote {
+                name: "origin".to_string(),
+                url: "https://github.com/user/repo".to_string(),
+                is_github: true,
+            }],
+            branches: vec![],
+            tags: vec![],
+            commits: vec![],
+        };
+        let state = AppState {
+            manager_selected_repo: Some("/repo1".to_string()),
+            ..Default::default()
+        };
+        let result = reducer(&state, &AppAction::SetManagerDetails(Some(details.clone())));
+        assert_eq!(result.manager_details, Some(details));
+    }
+
+    #[test]
+    fn test_remove_recent_repo_removes_from_list() {
+        let state = AppState {
+            recent_repos: vec![
+                "/repo1".to_string(),
+                "/repo2".to_string(),
+                "/repo3".to_string(),
+            ],
+            manager_selected_repo: Some("/repo2".to_string()),
+            ..Default::default()
+        };
+        let result = reducer(&state, &AppAction::RemoveRecentRepo("/repo2".to_string()));
+        assert_eq!(
+            result.recent_repos,
+            vec!["/repo1".to_string(), "/repo3".to_string()]
+        );
+        assert!(result.manager_selected_repo.is_none());
+        assert!(result.manager_details.is_none());
+    }
+
+    #[test]
+    fn test_remove_recent_repo_preserves_other_selection() {
+        let details = ManagerRepoDetails {
+            repo_path: "/repo1".to_string(),
+            repo_name: "repo1".to_string(),
+            branch: "main".to_string(),
+            uncommitted_files: 0,
+            total_commits: 10,
+            initial_commit_date: "1 year ago".to_string(),
+            last_commit_date: "1 day ago".to_string(),
+            remotes: vec![],
+            branches: vec![],
+            tags: vec![],
+            commits: vec![],
+        };
+        let state = AppState {
+            recent_repos: vec!["/repo1".to_string(), "/repo2".to_string()],
+            manager_selected_repo: Some("/repo1".to_string()),
+            manager_details: Some(details.clone()),
+            ..Default::default()
+        };
+        let result = reducer(&state, &AppAction::RemoveRecentRepo("/repo2".to_string()));
+        assert_eq!(result.recent_repos, vec!["/repo1".to_string()]);
+        assert_eq!(result.manager_selected_repo, Some("/repo1".to_string()));
+        assert_eq!(result.manager_details, Some(details));
+    }
+
+    #[test]
+    fn test_manager_details_serialization_round_trip() {
+        let details = ManagerRepoDetails {
+            repo_path: "/home/user/my-project".to_string(),
+            repo_name: "my-project".to_string(),
+            branch: "develop".to_string(),
+            uncommitted_files: 5,
+            total_commits: 128,
+            initial_commit_date: "2 years ago".to_string(),
+            last_commit_date: "3 minutes ago".to_string(),
+            remotes: vec![
+                ManagerRemote {
+                    name: "origin".to_string(),
+                    url: "https://github.com/user/my-project".to_string(),
+                    is_github: true,
+                },
+                ManagerRemote {
+                    name: "upstream".to_string(),
+                    url: "https://gitlab.com/org/my-project".to_string(),
+                    is_github: false,
+                },
+            ],
+            branches: vec![ManagerBranch {
+                name: "main".to_string(),
+                last_message: "fix: resolve merge conflict".to_string(),
+                author: "Alice".to_string(),
+                relative_date: "1 hour ago".to_string(),
+            }],
+            tags: vec![ManagerTag {
+                name: "v1.0.0".to_string(),
+                author: "Bob".to_string(),
+                relative_date: "1 week ago".to_string(),
+            }],
+            commits: vec![ManagerCommit {
+                message: "feat: add new feature".to_string(),
+                author: "Charlie".to_string(),
+                relative_date: "just now".to_string(),
+            }],
+        };
+
+        let serialized = serde_json::to_string(&details).unwrap();
+        let deserialized: ManagerRepoDetails = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(details, deserialized);
+    }
 }
