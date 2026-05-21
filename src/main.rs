@@ -42,6 +42,7 @@ struct PalimpsestApp {
     commit_panel_state: commit_panel::State,
     command_palette_state: command_palette::State,
     manager_body_state: repo_manager_body::State,
+    manager_sidebar_state: repo_manager_sidebar::SidebarState,
 }
 
 impl PalimpsestApp {
@@ -68,6 +69,7 @@ impl PalimpsestApp {
             commit_panel_state: commit_panel::State::default(),
             command_palette_state: command_palette::State::default(),
             manager_body_state: repo_manager_body::State::default(),
+            manager_sidebar_state: repo_manager_sidebar::SidebarState::default(),
         };
 
         app.restore_active_repo_from_state();
@@ -102,7 +104,7 @@ impl PalimpsestApp {
                 self.open_repo(&path);
             }
         } else if !state.recent_repos.is_empty() {
-            let first_recent = state.recent_repos[0].clone();
+            let first_recent = state.recent_repos[0].path.clone();
             self.store
                 .dispatch(AppAction::SelectManagerRepo(Some(first_recent.clone())));
             self.fetch_manager_details(&first_recent);
@@ -491,9 +493,9 @@ impl eframe::App for PalimpsestApp {
                 }
             }
             titlebar::OpenAction::SelectRecent(index) => {
-                if let Some(path) = self.store.get_state().recent_repos.get(index).cloned() {
-                    tracing::info!(repo = %path, "Selecting recent repository");
-                    self.open_repo(&path);
+                if let Some(repo) = self.store.get_state().recent_repos.get(index) {
+                    tracing::info!(repo = %repo.path, "Selecting recent repository");
+                    self.open_repo(&repo.path);
                 }
             }
             titlebar::OpenAction::None => {}
@@ -583,7 +585,7 @@ impl eframe::App for PalimpsestApp {
                         .id_salt("manager_sidebar")
                         .max_rect(sidebar_rect)
                         .layout(egui::Layout::top_down(egui::Align::Min)),
-                    |ui| repo_manager_sidebar::show(ui, &state),
+                    |ui| repo_manager_sidebar::show(ui, &mut self.manager_sidebar_state, &state),
                 )
                 .inner
             {

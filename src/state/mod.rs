@@ -12,11 +12,17 @@ const SESSION_FILE_NAME: &str = "session.json";
 const APP_ID: &str = "Palimpsest";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentRepo {
+    pub path: String,
+    pub last_opened: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSession {
     pub version: u32,
     pub open_tabs: Vec<String>,
     pub active_tab: Option<usize>,
-    pub recent_repos: Vec<String>,
+    pub recent_repos: Vec<RecentRepo>,
     pub show_window_buttons: bool,
 }
 
@@ -142,7 +148,7 @@ pub struct AppState {
     pub open_tabs: Vec<String>,
     pub active_tab: Option<usize>,
     pub current_repo: Option<String>,
-    pub recent_repos: Vec<String>,
+    pub recent_repos: Vec<RecentRepo>,
     pub show_window_buttons: bool,
     pub cached_commits: Vec<CachedCommit>,
     pub cached_branches: Vec<CachedBranch>,
@@ -312,10 +318,20 @@ impl AppState {
     }
 
     fn open_or_activate(mut self, path: &str) -> Self {
-        self.recent_repos.retain(|recent| recent != path);
-        self.recent_repos.insert(0, path.to_string());
-        if self.recent_repos.len() > 10 {
-            self.recent_repos.truncate(10);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.recent_repos.retain(|r| r.path != path);
+        self.recent_repos.insert(
+            0,
+            RecentRepo {
+                path: path.to_string(),
+                last_opened: now,
+            },
+        );
+        if self.recent_repos.len() > 20 {
+            self.recent_repos.truncate(20);
         }
 
         if let Some(index) = self.open_tabs.iter().position(|tab| tab == path) {
@@ -377,10 +393,20 @@ impl AppState {
     }
 
     pub fn push_recent(mut self, path: &str) -> Self {
-        self.recent_repos.retain(|p| p != path);
-        self.recent_repos.insert(0, path.to_string());
-        if self.recent_repos.len() > 10 {
-            self.recent_repos.truncate(10);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.recent_repos.retain(|r| r.path != path);
+        self.recent_repos.insert(
+            0,
+            RecentRepo {
+                path: path.to_string(),
+                last_opened: now,
+            },
+        );
+        if self.recent_repos.len() > 20 {
+            self.recent_repos.truncate(20);
         }
         self
     }
@@ -518,8 +544,11 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
     match action {
         AppAction::OpenRepo(path) => state.clone().open_or_activate(path).clear_cache(),
         AppAction::SelectRecent(index) => {
-            if let Some(path) = state.recent_repos.get(*index).cloned() {
-                state.clone().open_or_activate(path.as_str()).clear_cache()
+            if let Some(repo) = state.recent_repos.get(*index) {
+                state
+                    .clone()
+                    .open_or_activate(repo.path.as_str())
+                    .clear_cache()
             } else {
                 state.clone()
             }
@@ -612,7 +641,7 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
             recent_repos: state
                 .recent_repos
                 .iter()
-                .filter(|r| r.as_str() != path.as_str())
+                .filter(|r| r.path != *path)
                 .cloned()
                 .collect(),
             show_window_buttons: state.show_window_buttons,
@@ -681,29 +710,51 @@ mod tests {
         let state = AppState::default();
         let state = state.push_recent("/path/to/repo");
         assert_eq!(state.recent_repos.len(), 1);
-        assert_eq!(state.recent_repos[0], "/path/to/repo");
+        assert_eq!(state.recent_repos[0].path, "/path/to/repo");
     }
 
     #[test]
     fn test_push_recent_moves_existing_to_front() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let state = AppState {
-            recent_repos: vec!["/a".to_string(), "/b".to_string()],
+            recent_repos: vec![
+                RecentRepo {
+                    path: "/a".to_string(),
+                    last_opened: now,
+                },
+                RecentRepo {
+                    path: "/b".to_string(),
+                    last_opened: now,
+                },
+            ],
             ..Default::default()
         };
         let state = state.push_recent("/b");
-        assert_eq!(state.recent_repos[0], "/b");
+        assert_eq!(state.recent_repos[0].path, "/b");
         assert_eq!(state.recent_repos.len(), 2);
     }
 
     #[test]
-    fn test_push_recent_truncates_at_10() {
+    fn test_push_recent_truncates_at_20() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let mut state = AppState {
-            recent_repos: (0..10).map(|i| format!("/repo{}", i)).collect(),
+            recent_repos: (0..20)
+                .map(|i| RecentRepo {
+                    path: format!("/repo{}", i),
+                    last_opened: now,
+                })
+                .collect(),
             ..Default::default()
         };
         state = state.push_recent("/new-repo");
-        assert_eq!(state.recent_repos.len(), 10);
-        assert_eq!(state.recent_repos[0], "/new-repo");
+        assert_eq!(state.recent_repos.len(), 20);
+        assert_eq!(state.recent_repos[0].path, "/new-repo");
     }
 
     #[test]
@@ -733,8 +784,21 @@ mod tests {
 
     #[test]
     fn test_select_recent_action() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let state = AppState {
-            recent_repos: vec!["/a".to_string(), "/b".to_string()],
+            recent_repos: vec![
+                RecentRepo {
+                    path: "/a".to_string(),
+                    last_opened: now,
+                },
+                RecentRepo {
+                    path: "/b".to_string(),
+                    last_opened: now,
+                },
+            ],
             ..Default::default()
         };
         let result = reducer(&state, &AppAction::SelectRecent(1));
@@ -780,11 +844,24 @@ mod tests {
 
     #[test]
     fn test_session_round_trip() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let session = AppSession {
             version: SESSION_VERSION,
             open_tabs: vec!["/one".to_string(), "/two".to_string()],
             active_tab: Some(1),
-            recent_repos: vec!["/two".to_string(), "/one".to_string()],
+            recent_repos: vec![
+                RecentRepo {
+                    path: "/two".to_string(),
+                    last_opened: now,
+                },
+                RecentRepo {
+                    path: "/one".to_string(),
+                    last_opened: now,
+                },
+            ],
             show_window_buttons: false,
         };
 
@@ -809,8 +886,21 @@ mod tests {
 
     #[test]
     fn test_select_manager_repo_sets_selection() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let state = AppState {
-            recent_repos: vec!["/repo1".to_string(), "/repo2".to_string()],
+            recent_repos: vec![
+                RecentRepo {
+                    path: "/repo1".to_string(),
+                    last_opened: now,
+                },
+                RecentRepo {
+                    path: "/repo2".to_string(),
+                    last_opened: now,
+                },
+            ],
             ..Default::default()
         };
         let result = reducer(
@@ -875,18 +965,35 @@ mod tests {
 
     #[test]
     fn test_remove_recent_repo_removes_from_list() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let state = AppState {
             recent_repos: vec![
-                "/repo1".to_string(),
-                "/repo2".to_string(),
-                "/repo3".to_string(),
+                RecentRepo {
+                    path: "/repo1".to_string(),
+                    last_opened: now,
+                },
+                RecentRepo {
+                    path: "/repo2".to_string(),
+                    last_opened: now,
+                },
+                RecentRepo {
+                    path: "/repo3".to_string(),
+                    last_opened: now,
+                },
             ],
             manager_selected_repo: Some("/repo2".to_string()),
             ..Default::default()
         };
         let result = reducer(&state, &AppAction::RemoveRecentRepo("/repo2".to_string()));
         assert_eq!(
-            result.recent_repos,
+            result
+                .recent_repos
+                .iter()
+                .map(|r| r.path.clone())
+                .collect::<Vec<_>>(),
             vec!["/repo1".to_string(), "/repo3".to_string()]
         );
         assert!(result.manager_selected_repo.is_none());
@@ -895,6 +1002,10 @@ mod tests {
 
     #[test]
     fn test_remove_recent_repo_preserves_other_selection() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let details = ManagerRepoDetails {
             repo_path: "/repo1".to_string(),
             repo_name: "repo1".to_string(),
@@ -909,13 +1020,23 @@ mod tests {
             commits: vec![],
         };
         let state = AppState {
-            recent_repos: vec!["/repo1".to_string(), "/repo2".to_string()],
+            recent_repos: vec![
+                RecentRepo {
+                    path: "/repo1".to_string(),
+                    last_opened: now,
+                },
+                RecentRepo {
+                    path: "/repo2".to_string(),
+                    last_opened: now,
+                },
+            ],
             manager_selected_repo: Some("/repo1".to_string()),
             manager_details: Some(details.clone()),
             ..Default::default()
         };
         let result = reducer(&state, &AppAction::RemoveRecentRepo("/repo2".to_string()));
-        assert_eq!(result.recent_repos, vec!["/repo1".to_string()]);
+        assert_eq!(result.recent_repos.len(), 1);
+        assert_eq!(result.recent_repos[0].path, "/repo1");
         assert_eq!(result.manager_selected_repo, Some("/repo1".to_string()));
         assert_eq!(result.manager_details, Some(details));
     }

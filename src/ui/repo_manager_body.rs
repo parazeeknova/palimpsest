@@ -41,7 +41,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut State, app_state: &AppState) -> Optio
     if let Some(open_path) = paint_top_bar(ui, rect, y, details) {
         return Some(open_path);
     }
-    y += 56.0;
+    y += 64.0;
     y += SECTION_GAP;
 
     y = paint_stats_panel(ui, rect, y, details);
@@ -94,42 +94,89 @@ fn paint_top_bar(
     y: f32,
     details: &ManagerRepoDetails,
 ) -> Option<String> {
-    let row_height = 56.0;
+    let row_height = 72.0;
     let row = egui::Rect::from_min_size(
         egui::pos2(rect.left() + 16.0, y),
         egui::vec2(rect.width() - 32.0, row_height),
     );
 
+    let left_x = row.left();
+    let right_x = row.right();
+    let center_y = row.center().y;
+
     ui.painter().text(
-        egui::pos2(row.left(), row.top() + 16.0),
-        egui::Align2::LEFT_TOP,
+        egui::pos2(left_x, center_y),
+        egui::Align2::LEFT_BOTTOM,
         &details.repo_name,
-        egui::FontId::proportional(18.0),
-        ui.visuals().text_color(),
+        egui::FontId::new(20.0, egui::FontFamily::Proportional),
+        ui.visuals().strong_text_color(),
     );
 
-    let path_y = row.top() + 36.0;
+    let _path_width = ui
+        .painter()
+        .layout_no_wrap(
+            details.repo_path.clone(),
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgb(140, 140, 140),
+        )
+        .rect
+        .width();
     ui.painter().text(
-        egui::pos2(row.left(), path_y),
-        egui::Align2::LEFT_CENTER,
+        egui::pos2(left_x, center_y + 4.0),
+        egui::Align2::LEFT_TOP,
         &details.repo_path,
         egui::FontId::proportional(11.0),
         egui::Color32::from_rgb(140, 140, 140),
     );
 
+    let open_btn_width = 70.0;
+    let explorer_btn_width = 130.0;
+    let btn_height = 28.0;
+    let btn_gap = 8.0;
+    let total_btn_width = explorer_btn_width + btn_gap + open_btn_width;
+
     let explorer_btn_rect = egui::Rect::from_min_size(
-        egui::pos2(
-            row.left() + details.repo_path.len() as f32 * 5.5 + 8.0,
-            path_y - 8.0,
-        ),
-        egui::vec2(20.0, 16.0),
+        egui::pos2(right_x - total_btn_width, center_y - btn_height / 2.0),
+        egui::vec2(explorer_btn_width, btn_height),
+    );
+    let explorer_hovered = ui.rect_contains_pointer(explorer_btn_rect);
+    let explorer_bg = if explorer_hovered {
+        egui::Color32::from_rgb(75, 75, 75)
+    } else {
+        egui::Color32::from_rgb(62, 62, 62)
+    };
+    ui.painter()
+        .rect_filled(explorer_btn_rect, 4.0, explorer_bg);
+    let explorer_icon_w = 14.0;
+    let explorer_label = "Open in Explorer";
+    let explorer_label_w = ui
+        .painter()
+        .layout_no_wrap(
+            explorer_label.to_string(),
+            egui::FontId::proportional(11.0),
+            ui.visuals().text_color(),
+        )
+        .rect
+        .width();
+    let explorer_content_w = explorer_icon_w + 6.0 + explorer_label_w;
+    let explorer_start_x =
+        explorer_btn_rect.left() + (explorer_btn_width - explorer_content_w) / 2.0;
+    ui.painter().text(
+        egui::pos2(explorer_start_x, explorer_btn_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        FOLDER,
+        egui::FontId::proportional(14.0),
+        ui.visuals().text_color(),
     );
     ui.painter().text(
-        explorer_btn_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        FOLDER,
-        egui::FontId::proportional(12.0),
-        egui::Color32::from_rgb(140, 140, 140),
+        egui::pos2(
+            explorer_start_x + explorer_icon_w + 6.0,
+            explorer_btn_rect.center().y,
+        ),
+        egui::Align2::LEFT_CENTER,
+        explorer_label,
+        egui::FontId::proportional(11.0),
+        ui.visuals().text_color(),
     );
     let explorer_resp = ui.interact(
         explorer_btn_rect,
@@ -149,22 +196,40 @@ fn paint_top_bar(
     }
 
     let open_btn_rect = egui::Rect::from_min_size(
-        egui::pos2(row.right() - 80.0, row.top() + 14.0),
-        egui::vec2(70.0, 28.0),
+        egui::pos2(right_x - open_btn_width, center_y - btn_height / 2.0),
+        egui::vec2(open_btn_width, btn_height),
     );
-    ui.painter()
-        .rect_filled(open_btn_rect, 4.0, egui::Color32::from_rgb(62, 62, 62));
+    let open_hovered = ui.rect_contains_pointer(open_btn_rect);
+    let open_bg = if open_hovered {
+        egui::Color32::from_rgb(75, 75, 75)
+    } else {
+        egui::Color32::from_rgb(62, 62, 62)
+    };
+    ui.painter().rect_filled(open_btn_rect, 4.0, open_bg);
+    let open_icon_w = 14.0;
+    let open_label = "Open";
+    let open_label_w = ui
+        .painter()
+        .layout_no_wrap(
+            open_label.to_string(),
+            egui::FontId::proportional(12.0),
+            ui.visuals().text_color(),
+        )
+        .rect
+        .width();
+    let open_content_w = open_icon_w + 6.0 + open_label_w;
+    let open_start_x = open_btn_rect.left() + (open_btn_width - open_content_w) / 2.0;
     ui.painter().text(
-        egui::pos2(open_btn_rect.left() + 14.0, open_btn_rect.center().y),
-        egui::Align2::CENTER_CENTER,
+        egui::pos2(open_start_x, open_btn_rect.center().y),
+        egui::Align2::LEFT_CENTER,
         ARROW_SQUARE_OUT,
-        egui::FontId::proportional(12.0),
+        egui::FontId::proportional(14.0),
         ui.visuals().text_color(),
     );
     ui.painter().text(
-        egui::pos2(open_btn_rect.left() + 32.0, open_btn_rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        "Open",
+        egui::pos2(open_start_x + open_icon_w + 6.0, open_btn_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        open_label,
         egui::FontId::proportional(12.0),
         ui.visuals().text_color(),
     );

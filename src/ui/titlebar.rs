@@ -21,6 +21,9 @@ pub enum OpenAction {
     SelectRecent(usize),
 }
 
+use crate::state::RecentRepo;
+use crate::ui::repo_manager::format_relative_time;
+
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -28,7 +31,7 @@ pub fn show(
     menu_open: &mut bool,
     search_query: &mut String,
     repo_name: Option<&str>,
-    recent_repos: &[String],
+    recent_repos: &[RecentRepo],
     show_window_buttons: &mut bool,
     debug_open: &mut bool,
 ) -> OpenAction {
@@ -94,13 +97,15 @@ pub fn show(
                                             .color(egui::Color32::from_rgb(140, 140, 140)),
                                     );
                                     ui.separator();
-                                    for (i, path) in recent_repos.iter().enumerate() {
-                                        let name = repo_display_name(path);
+                                    for (i, repo) in recent_repos.iter().enumerate() {
+                                        let name = repo_display_name(&repo.path);
+                                        let time_ago =
+                                            format_relative_time(repo.last_opened as i64);
                                         if ui
                                             .button(
                                                 egui::RichText::new(format!(
-                                                    "{}  {}",
-                                                    FOLDER, name
+                                                    "{}  {}  {}",
+                                                    FOLDER, name, time_ago
                                                 ))
                                                 .size(12.0),
                                             )
