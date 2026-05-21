@@ -553,6 +553,15 @@ pub fn show_cached(
 
     ui.painter().rect_filled(rect, 0.0, bg);
 
+    if app_state.cached_commits.is_empty() {
+        let logo = egui::Image::new(egui::include_image!("../assets/logo.svg"))
+            .tint(egui::Color32::from_white_alpha(40))
+            .fit_to_exact_size(egui::vec2(200.0, 200.0));
+        let logo_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 200.0));
+        ui.put(logo_rect, logo);
+        return;
+    }
+
     let header_rect =
         egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), HEADER_HEIGHT));
     ui.painter()

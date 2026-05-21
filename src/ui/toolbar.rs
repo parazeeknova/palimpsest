@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui_phosphor::regular::{
     ARROW_CLOCKWISE, ARROW_COUNTER_CLOCKWISE, ARROWS_CLOCKWISE, BROWSERS, CARET_DOWN, FOLDER,
-    GIT_BRANCH, GIT_FORK, GIT_PULL_REQUEST, LIST, SIDEBAR, STACK, TERMINAL_WINDOW,
+    GIT_BRANCH, GIT_FORK, GIT_PULL_REQUEST, SIDEBAR, STACK, TERMINAL_WINDOW, TEXT_ALIGN_LEFT,
 };
 
 const TOOLBAR_HEIGHT: f32 = 46.0;
@@ -116,42 +116,59 @@ fn left_panel(ui: &mut egui::Ui) -> bool {
 
 fn center_panel(ui: &mut egui::Ui, repo_name: Option<&str>, current_branch: Option<&str>) {
     let rect = ui.max_rect();
-    let group_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(160.0, ACTION_HEIGHT));
-    let icon_rect =
-        egui::Rect::from_min_size(group_rect.left_top(), egui::vec2(30.0, ACTION_HEIGHT));
+    let group_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, ACTION_HEIGHT));
     let text_rect = egui::Rect::from_min_size(
-        egui::pos2(icon_rect.right() + 8.0, group_rect.top()),
-        egui::vec2(122.0, ACTION_HEIGHT),
+        egui::pos2(group_rect.left() + 8.0, group_rect.top()),
+        egui::vec2(184.0, ACTION_HEIGHT),
     );
 
-    child_ui(
-        ui,
-        icon_rect,
-        "toolbar_center_icon",
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.add_sized(
-                [28.0, ACTION_HEIGHT],
-                egui::Label::new(egui::RichText::new(LIST).size(14.0)),
-            );
-        },
+    let menu_icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.bottom() - 20.0),
+        egui::vec2(16.0, 16.0),
+    );
+    ui.painter().text(
+        menu_icon_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        TEXT_ALIGN_LEFT,
+        egui::FontId::proportional(14.0),
+        ui.visuals().text_color(),
     );
 
     child_ui(
         ui,
         text_rect,
         "toolbar_center_text",
-        egui::Layout::top_down(egui::Align::Min),
+        egui::Layout::top_down(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-            let label = repo_name.unwrap_or("no repository");
-            ui.label(egui::RichText::new(label).size(13.0).strong());
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-                ui.label(egui::RichText::new(GIT_BRANCH).size(11.0));
-                let branch_name = current_branch.unwrap_or("no branch");
-                ui.label(egui::RichText::new(branch_name).size(10.0));
-            });
+            if let Some(name) = repo_name {
+                ui.add(egui::Label::new(egui::RichText::new(name).size(13.0).strong()).truncate());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
+                    ui.label(egui::RichText::new(GIT_BRANCH).size(11.0));
+                    let branch_name = current_branch.unwrap_or("no branch");
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(branch_name).size(10.0)).truncate(),
+                    );
+                });
+            } else {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Welcome to Palimpsest!")
+                            .size(12.0)
+                            .strong(),
+                    )
+                    .truncate(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Open a repo to start")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                    )
+                    .truncate(),
+                );
+            }
         },
     );
 }

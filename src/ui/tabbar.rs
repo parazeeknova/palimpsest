@@ -54,14 +54,23 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) -> Option<TabAction> {
     let tabs_rect = egui::Rect::from_min_max(rect.left_top(), plus_rect.left_bottom());
 
     if tabs.is_empty() {
+        let empty_tab_rect = egui::Rect::from_min_max(rect.left_top(), plus_rect.left_bottom());
+        paint_empty_tab(ui, empty_tab_rect);
         paint_plus(ui, plus_rect, stroke);
         if ui
             .interact(
-                plus_rect,
-                ui.make_persistent_id("tabbar_open"),
+                empty_tab_rect,
+                ui.make_persistent_id("tabbar_empty"),
                 egui::Sense::click(),
             )
             .clicked()
+            || ui
+                .interact(
+                    plus_rect,
+                    ui.make_persistent_id("tabbar_open"),
+                    egui::Sense::click(),
+                )
+                .clicked()
         {
             return Some(TabAction::Open);
         }
@@ -262,9 +271,12 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-fn paint_plus(ui: &mut egui::Ui, rect: egui::Rect, stroke: egui::Stroke) {
-    ui.painter()
-        .line_segment([rect.left_top(), rect.left_bottom()], stroke);
+fn paint_empty_tab(ui: &mut egui::Ui, rect: egui::Rect) {
+    let fill = egui::Color32::from_rgb(62, 62, 62);
+    ui.painter().rect_filled(rect, 0.0, fill);
+}
+
+fn paint_plus(ui: &mut egui::Ui, rect: egui::Rect, _stroke: egui::Stroke) {
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
