@@ -39,19 +39,22 @@ impl GitRepo {
         }
     }
 
-    pub fn commits(&self, limit: usize) -> Result<Vec<Commit>, GitError> {
+    pub fn commits(&self, limit: Option<usize>) -> Result<Vec<Commit>, GitError> {
         let mut revwalk = self.repo.revwalk()?;
         revwalk.set_sorting(Sort::TOPOLOGICAL)?;
         revwalk.push_head()?;
 
-        let commits: Vec<Commit> = revwalk
-            .take(limit)
-            .map(|oid_result| {
-                let oid = oid_result?;
-                let commit = self.repo.find_commit(oid)?;
-                Ok(self.commit_from_git2(&commit))
-            })
-            .collect::<Result<Vec<_>, git2::Error>>()?;
+        let mut commits = Vec::new();
+        for oid_result in revwalk {
+            let oid = oid_result?;
+            let commit = self.repo.find_commit(oid)?;
+            commits.push(self.commit_from_git2(&commit));
+            if let Some(l) = limit {
+                if commits.len() >= l {
+                    break;
+                }
+            }
+        }
 
         tracing::info!(count = commits.len(), "Commits fetched");
         Ok(commits)
@@ -125,10 +128,10 @@ impl GitRepo {
             .iter()
             .filter_map(|r| r.ok().flatten())
             .map(|name| {
-                let tag_ref = self.repo.find_reference(&format!("refs/tags/{}", name))?;
-                let target = tag_ref.peel_to_commit()?;
-                let (author, timestamp) = if let Ok(tag_obj) = tag_ref.peel_to_tag() {
-                    if let Some(tagger) = tag_obj.tagger() {
+                let oid = self.repo.revparse_single(&format!("refs/tags/{}", name))?;
+                let target = oid.peel_to_commit()?;
+                let (author, timestamp) = if let Ok(tag) = self.repo.find_tag(oid.id()) {
+                    if let Some(tagger) = tag.tagger() {
                         (
                             tagger.name().unwrap_or("Unknown").to_string(),
                             secs_to_system_time(tagger.when().seconds()),
@@ -599,40 +602,103 @@ impl GitRepo {
         }
     }
 
+    fn resolve_upstream_or_fallback(&self) -> Result<(String, String, bool), GitError> {
+        let mut remote_name = None;
+        let mut remote_branch = None;
+        let mut has_upstream = false;
+
+        if let Ok(head) = self.repo.head() {
+            if head.is_branch() {
+                if let Ok(local_ref_name) = head.name() {
+                    if let (Ok(remote_buf), Ok(merge_buf)) = (
+                        self.repo.branch_upstream_remote(local_ref_name),
+                        self.repo.branch_upstream_merge(local_ref_name),
+                    ) {
+                        if let (Ok(r), Ok(m)) = (remote_buf.as_str(), merge_buf.as_str()) {
+                            remote_name = Some(r.to_string());
+                            let branch_part = if let Some(stripped) = m.strip_prefix("refs/heads/")
+                            {
+                                stripped.to_string()
+                            } else {
+                                m.to_string()
+                            };
+                            remote_branch = Some(branch_part);
+                            has_upstream = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let remote_name = match remote_name {
+            Some(r) => r,
+            None => {
+                let remotes = self.repo.remotes()?;
+                match remotes.get(0)? {
+                    Some(name) => name.to_string(),
+                    None => return Err(GitError::Git("No remotes configured".to_string())),
+                }
+            }
+        };
+
+        let remote_branch = match remote_branch {
+            Some(b) => b,
+            None => {
+                if let Ok(head) = self.repo.head() {
+                    if head.is_branch() {
+                        head.shorthand().unwrap_or("main").to_string()
+                    } else {
+                        "main".to_string()
+                    }
+                } else {
+                    "main".to_string()
+                }
+            }
+        };
+
+        Ok((remote_name, remote_branch, has_upstream))
+    }
+
     pub fn fetch(&self) -> Result<(), GitError> {
-        let remotes = self.repo.remotes()?;
-        let remote_name = remotes
-            .get(0)
-            .ok_or_else(|| GitError::Git("No remotes configured".to_string()))?;
-        let mut remote = self.repo.find_remote(remote_name)?;
-        remote.fetch(&[] as &[&str], None, None)?;
+        let (remote_name, remote_branch, has_upstream) = self.resolve_upstream_or_fallback()?;
+        let mut remote = self.repo.find_remote(&remote_name)?;
+        if has_upstream {
+            let refspec =
+                format!("refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
+            remote.fetch(&[&refspec], None, None)?;
+        } else {
+            remote.fetch(&[] as &[&str], None, None)?;
+        }
         Ok(())
     }
 
     pub fn pull(&self) -> Result<(), GitError> {
-        let remotes = self.repo.remotes()?;
-        let remote_name = remotes
-            .get(0)
-            .ok_or_else(|| GitError::Git("No remotes configured".to_string()))?;
         let head = self.repo.head()?;
-        let branch_name = head
-            .shorthand()
-            .ok_or_else(|| GitError::Git("Cannot pull from detached HEAD".to_string()))?;
-        let mut remote = self.repo.find_remote(remote_name)?;
-        let remote_branch = format!("refs/remotes/{remote_name}/{branch_name}");
-        let refspec = format!("refs/heads/{branch_name}:refs/remotes/{remote_name}/{branch_name}");
+        if !head.is_branch() {
+            return Err(GitError::Git("Cannot pull from detached HEAD".to_string()));
+        }
+        let branch_name = head.shorthand()?;
+        let (remote_name, remote_branch, _has_upstream) = self.resolve_upstream_or_fallback()?;
+        let mut remote = self.repo.find_remote(&remote_name)?;
+        let refspec =
+            format!("refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
         remote.fetch(&[&refspec], None, None)?;
-        let fetch_commit = self.repo.find_reference(&remote_branch)?.peel_to_commit()?;
+        let remote_ref_name = format!("refs/remotes/{remote_name}/{remote_branch}");
+        let remote_ref = self.repo.find_reference(&remote_ref_name)?;
+        let remote_commit = remote_ref.peel_to_commit()?;
         let refname = format!("refs/heads/{}", branch_name);
         let mut local_ref = self.repo.find_reference(&refname)?;
         let local_commit = local_ref.peel_to_commit()?;
-        let ancestor = self.repo.merge_base(local_commit.id(), fetch_commit.id())?;
-        if ancestor == fetch_commit.id() {
+        let ancestor = self
+            .repo
+            .merge_base(local_commit.id(), remote_commit.id())?;
+        if ancestor == remote_commit.id() {
             return Ok(());
         }
         if ancestor != local_commit.id() {
             return Err(GitError::Git(
-                "Cannot fast-forward pull because branches have diverged".to_string(),
+                "Local and remote histories have diverged. Requires explicit merge or rebase."
+                    .to_string(),
             ));
         }
 
@@ -646,26 +712,24 @@ impl GitRepo {
             ));
         }
 
-        let tree = self.repo.find_commit(fetch_commit.id())?.tree()?;
+        let tree = self.repo.find_commit(remote_commit.id())?.tree()?;
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts.force();
         self.repo
             .checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
-        local_ref.set_target(fetch_commit.id(), "pull: Fast-forward")?;
+        local_ref.set_target(remote_commit.id(), "pull: Fast-forward")?;
         Ok(())
     }
 
     pub fn push(&self) -> Result<(), GitError> {
-        let remotes = self.repo.remotes()?;
-        let remote_name = remotes
-            .get(0)
-            .ok_or_else(|| GitError::Git("No remotes configured".to_string()))?;
         let head = self.repo.head()?;
-        let branch_name = head
-            .shorthand()
-            .ok_or_else(|| GitError::Git("Cannot push from detached HEAD".to_string()))?;
-        let refspec = format!("refs/heads/{}:refs/heads/{}", branch_name, branch_name);
-        let mut remote = self.repo.find_remote(remote_name)?;
+        if !head.is_branch() {
+            return Err(GitError::Git("Cannot push from detached HEAD".to_string()));
+        }
+        let branch_name = head.shorthand()?;
+        let (remote_name, remote_branch, _has_upstream) = self.resolve_upstream_or_fallback()?;
+        let refspec = format!("refs/heads/{}:refs/heads/{}", branch_name, remote_branch);
+        let mut remote = self.repo.find_remote(&remote_name)?;
         remote.push(&[&refspec], None)?;
         Ok(())
     }

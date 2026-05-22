@@ -139,7 +139,6 @@ impl AppSession {
 
         if let Err(error) = fs::rename(&temp_path, &path) {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
-                let _ = fs::remove_file(&path);
                 if let Err(error) = fs::rename(&temp_path, &path) {
                     tracing::warn!(from = %temp_path.display(), to = %path.display(), error = %error, "Failed to commit session file");
                 }
@@ -564,8 +563,25 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
                 state.clone()
             }
         }
-        AppAction::ActivateTab(index) => state.clone().activate_tab(*index).clear_cache(),
-        AppAction::CloseTab(index) => state.clone().close_tab(*index).clear_cache(),
+        AppAction::ActivateTab(index) => {
+            let prev_repo = state.current_repo.clone();
+            let next_state = state.clone().activate_tab(*index);
+            if next_state.current_repo != prev_repo {
+                next_state.clear_cache()
+            } else {
+                next_state
+            }
+        }
+        AppAction::CloseTab(index) => {
+            let prev_repo = state.current_repo.clone();
+            let was_active = state.active_tab == Some(*index);
+            let next_state = state.clone().close_tab(*index);
+            if was_active && next_state.current_repo != prev_repo {
+                next_state.clear_cache()
+            } else {
+                next_state
+            }
+        }
         AppAction::ToggleWindowButtons(show) => AppState {
             open_tabs: state.open_tabs.clone(),
             active_tab: state.active_tab,

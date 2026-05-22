@@ -173,7 +173,7 @@ fn paint_repo_row(
     rect: egui::Rect,
     y: f32,
     name: &str,
-    id: &str,
+    path: &str,
     is_selected: bool,
     text: egui::Color32,
     selected: egui::Color32,
@@ -186,7 +186,7 @@ fn paint_repo_row(
 
     let response = ui.interact(
         row,
-        ui.make_persistent_id(("manager_repo", id)),
+        ui.make_persistent_id(("manager_repo", path)),
         egui::Sense::click(),
     );
 
@@ -214,7 +214,7 @@ fn paint_repo_row_with_time(
     rect: egui::Rect,
     y: f32,
     name: &str,
-    id: &str,
+    path: &str,
     time_ago: &str,
     is_selected: bool,
     text: egui::Color32,
@@ -228,7 +228,7 @@ fn paint_repo_row_with_time(
 
     let response = ui.interact(
         row,
-        ui.make_persistent_id(("manager_repo_recent", id)),
+        ui.make_persistent_id(("manager_repo_recent", path)),
         egui::Sense::click(),
     );
 

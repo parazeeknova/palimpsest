@@ -109,6 +109,26 @@ impl PalimpsestApp {
         if let Some(path) = state.current_repo.clone() {
             if self.git_repo.is_none() {
                 self.open_repo(&path);
+                if self.git_repo.is_none() {
+                    if let Some(index) = state.open_tabs.iter().position(|p| p == &path) {
+                        self.store.dispatch(AppAction::CloseTab(index));
+                    }
+                    self.store
+                        .dispatch(AppAction::RemoveRecentRepo(path.clone()));
+
+                    let next_state = self.store.get_state();
+                    if let Some(fallback_path) = next_state.current_repo.clone() {
+                        self.open_repo(&fallback_path);
+                    } else if !next_state.recent_repos.is_empty() {
+                        let first_recent = next_state.recent_repos[0].path.clone();
+                        self.store
+                            .dispatch(AppAction::SelectManagerRepo(Some(first_recent.clone())));
+                        self.fetch_manager_details(&first_recent);
+                    } else {
+                        self.store.dispatch(AppAction::SelectManagerRepo(None));
+                    }
+                    self.persist_session();
+                }
             }
         } else if !state.recent_repos.is_empty() {
             let first_recent = state.recent_repos[0].path.clone();
@@ -132,6 +152,28 @@ impl PalimpsestApp {
                 tracing::error!(error = %e, "Failed to open repository");
                 self.store
                     .dispatch(AppAction::SetRepoError(Some(e.to_string())));
+
+                let state = self.store.get_state();
+                if let Some(index) = state.open_tabs.iter().position(|p| p == path) {
+                    self.store.dispatch(AppAction::CloseTab(index));
+                }
+                self.store
+                    .dispatch(AppAction::RemoveRecentRepo(path.to_string()));
+
+                let next_state = self.store.get_state();
+                if let Some(next_path) = next_state.current_repo.clone() {
+                    if next_path != path {
+                        self.open_repo(&next_path);
+                    }
+                } else if !next_state.recent_repos.is_empty() {
+                    let first_recent = next_state.recent_repos[0].path.clone();
+                    self.store
+                        .dispatch(AppAction::SelectManagerRepo(Some(first_recent.clone())));
+                    self.fetch_manager_details(&first_recent);
+                } else {
+                    self.store.dispatch(AppAction::SelectManagerRepo(None));
+                }
+                self.persist_session();
             }
         }
     }
@@ -159,7 +201,7 @@ impl PalimpsestApp {
         if let Some(repo) = &self.git_repo {
             let mut errors = Vec::new();
 
-            let commits = match repo.commits(200) {
+            let commits = match repo.commits(Some(200)) {
                 Ok(c) => c,
                 Err(e) => {
                     errors.push(e.to_string());
@@ -267,28 +309,19 @@ impl PalimpsestApp {
                 self.debug_open = true;
             }
             QuickLaunchAction::Fetch => {
-                if let Some(repo) = &self.git_repo {
-                    match repo.fetch() {
-                        Ok(()) => self.refresh_git_data(),
-                        Err(e) => tracing::error!(error = %e, "Fetch failed"),
-                    }
-                }
+                self.store
+                    .dispatch(AppAction::SetRepoError(Some("Fetching...".to_string())));
+                self.run_background_git_job(ctx.clone(), |repo| repo.fetch());
             }
             QuickLaunchAction::Pull => {
-                if let Some(repo) = &self.git_repo {
-                    match repo.pull() {
-                        Ok(()) => self.refresh_git_data(),
-                        Err(e) => tracing::error!(error = %e, "Pull failed"),
-                    }
-                }
+                self.store
+                    .dispatch(AppAction::SetRepoError(Some("Pulling...".to_string())));
+                self.run_background_git_job(ctx.clone(), |repo| repo.pull());
             }
             QuickLaunchAction::Push => {
-                if let Some(repo) = &self.git_repo {
-                    match repo.push() {
-                        Ok(()) => self.refresh_git_data(),
-                        Err(e) => tracing::error!(error = %e, "Push failed"),
-                    }
-                }
+                self.store
+                    .dispatch(AppAction::SetRepoError(Some("Pushing...".to_string())));
+                self.run_background_git_job(ctx.clone(), |repo| repo.push());
             }
             QuickLaunchAction::StageAll => {
                 if let Some(repo) = &self.git_repo {
@@ -312,6 +345,99 @@ impl PalimpsestApp {
         }
     }
 
+    fn run_background_git_job<F>(&self, ctx: egui::Context, f: F)
+    where
+        F: FnOnce(&GitRepo) -> Result<(), palimpsest::git::error::GitError> + Send + 'static,
+    {
+        let store = self.store.clone();
+        let current_repo_path = match store.get_state().current_repo.clone() {
+            Some(path) => path,
+            None => return,
+        };
+
+        std::thread::spawn(move || {
+            let repo = match GitRepo::open(&current_repo_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    store.dispatch(AppAction::SetRepoError(Some(format!(
+                        "Failed to open repo: {}",
+                        e
+                    ))));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+
+            if let Err(e) = f(&repo) {
+                store.dispatch(AppAction::SetRepoError(Some(e.to_string())));
+                ctx.request_repaint();
+                return;
+            }
+
+            let mut errors = Vec::new();
+            let commits = match repo.commits(Some(200)) {
+                Ok(c) => c,
+                Err(e) => {
+                    errors.push(e.to_string());
+                    Vec::new()
+                }
+            };
+            let branches = match repo.branches() {
+                Ok(b) => b,
+                Err(e) => {
+                    errors.push(e.to_string());
+                    Vec::new()
+                }
+            };
+            let remotes = match repo.remotes() {
+                Ok(r) => r,
+                Err(e) => {
+                    errors.push(e.to_string());
+                    Vec::new()
+                }
+            };
+            let tags = match repo.tags() {
+                Ok(t) => t,
+                Err(e) => {
+                    errors.push(e.to_string());
+                    Vec::new()
+                }
+            };
+            let status = match repo.status() {
+                Ok(s) => s,
+                Err(e) => {
+                    errors.push(e.to_string());
+                    palimpsest::git::models::RepoStatus {
+                        branch: "HEAD".to_string(),
+                        staged_count: 0,
+                        unstaged_count: 0,
+                        staged_files: Vec::new(),
+                        unstaged_files: Vec::new(),
+                        additions: 0,
+                        deletions: 0,
+                        files_changed: 0,
+                    }
+                }
+            };
+
+            store.dispatch(AppAction::RefreshGitData {
+                commits,
+                branches,
+                remotes,
+                tags,
+                status,
+            });
+
+            if errors.is_empty() {
+                store.dispatch(AppAction::SetRepoError(None));
+            } else {
+                store.dispatch(AppAction::SetRepoError(Some(errors.join("; "))));
+            }
+
+            ctx.request_repaint();
+        });
+    }
+
     fn fetch_manager_details(&mut self, path: &str) {
         if self.store.get_state().manager_details.is_some() {
             return;
@@ -331,10 +457,11 @@ impl PalimpsestApp {
                     .as_ref()
                     .map_or(0, |s| s.staged_count + s.unstaged_count);
 
-                let commits = repo.commits(20).unwrap_or_default();
-                let total_commits = commits.len();
+                let commits = repo.commits(Some(20)).unwrap_or_default();
+                let all_commits = repo.commits(None).unwrap_or_default();
+                let total_commits = all_commits.len();
 
-                let initial_date = commits.last().map_or("unknown".to_string(), |c| {
+                let initial_date = all_commits.last().map_or("unknown".to_string(), |c| {
                     format_relative_time(
                         c.timestamp
                             .duration_since(std::time::UNIX_EPOCH)
@@ -342,7 +469,7 @@ impl PalimpsestApp {
                             .unwrap_or(0),
                     )
                 });
-                let last_date = commits.first().map_or("unknown".to_string(), |c| {
+                let last_date = all_commits.first().map_or("unknown".to_string(), |c| {
                     format_relative_time(
                         c.timestamp
                             .duration_since(std::time::UNIX_EPOCH)

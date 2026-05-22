@@ -559,53 +559,53 @@ pub fn show_cached(
             .fit_to_exact_size(egui::vec2(200.0, 200.0));
         let logo_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 200.0));
         ui.put(logo_rect, logo);
+    } else {
+        let header_rect =
+            egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), HEADER_HEIGHT));
+        ui.painter()
+            .rect_filled(header_rect.expand2(egui::vec2(0.0, 1.0)), 0.0, header_bg);
+        ui.painter().line_segment(
+            [header_rect.left_bottom(), header_rect.right_bottom()],
+            stroke,
+        );
+
+        clamp_columns(state, rect.width());
+        let total_width = total_content_width(state).max(rect.width());
+        let columns = columns_for(header_rect, state, total_width);
+        paint_header(ui, header_rect, &columns, state, stroke);
+
+        let rows_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), header_rect.bottom()),
+            rect.right_bottom(),
+        );
+
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .id_salt("commit_body_scroll_host")
+                .max_rect(rows_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+            |ui| {
+                egui::ScrollArea::both()
+                    .id_salt("commit_body_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let extra_row_height = if state.top_status_row.is_some() {
+                            ROW_HEIGHT
+                        } else {
+                            0.0
+                        };
+                        let content_size = egui::vec2(
+                            total_width,
+                            state.graph_data.commits.len() as f32 * ROW_HEIGHT + extra_row_height,
+                        );
+                        let (content_rect, _) =
+                            ui.allocate_exact_size(content_size, egui::Sense::hover());
+                        let columns = columns_for(content_rect, state, total_width);
+                        paint_rows(ui, content_rect, &columns, state);
+                    });
+            },
+        );
     }
-
-    let header_rect =
-        egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), HEADER_HEIGHT));
-    ui.painter()
-        .rect_filled(header_rect.expand2(egui::vec2(0.0, 1.0)), 0.0, header_bg);
-    ui.painter().line_segment(
-        [header_rect.left_bottom(), header_rect.right_bottom()],
-        stroke,
-    );
-
-    clamp_columns(state, rect.width());
-    let total_width = total_content_width(state).max(rect.width());
-    let columns = columns_for(header_rect, state, total_width);
-    paint_header(ui, header_rect, &columns, state, stroke);
-
-    let rows_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), header_rect.bottom()),
-        rect.right_bottom(),
-    );
-
-    ui.scope_builder(
-        egui::UiBuilder::new()
-            .id_salt("commit_body_scroll_host")
-            .max_rect(rows_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-        |ui| {
-            egui::ScrollArea::both()
-                .id_salt("commit_body_scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let extra_row_height = if state.top_status_row.is_some() {
-                        ROW_HEIGHT
-                    } else {
-                        0.0
-                    };
-                    let content_size = egui::vec2(
-                        total_width,
-                        state.graph_data.commits.len() as f32 * ROW_HEIGHT + extra_row_height,
-                    );
-                    let (content_rect, _) =
-                        ui.allocate_exact_size(content_size, egui::Sense::hover());
-                    let columns = columns_for(content_rect, state, total_width);
-                    paint_rows(ui, content_rect, &columns, state);
-                });
-        },
-    );
 
     let show_panel = app_state
         .cached_status

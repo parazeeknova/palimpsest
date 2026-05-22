@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest"
-version = "0.0.48"
+version = "0.0.51"
 dependencies = [
  "eframe",
  "egui-phosphor",
@@ -2532,6 +2532,7 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "url",
  "zed",
 ]
 

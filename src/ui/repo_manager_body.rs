@@ -536,7 +536,7 @@ fn paint_branch_row(ui: &egui::Ui, row: egui::Rect, branch: &crate::state::Manag
     );
 
     let msg_x = row.left() + 28.0 + branch.name.len() as f32 * 6.0 + 12.0;
-    let max_msg_width = (row.width() - (msg_x - row.left()) - 200.0).max(50.0);
+    let max_msg_width = (row.width() - (msg_x - row.left()) - 240.0).max(50.0);
     let display_msg = truncate(&branch.last_message, max_msg_width);
     ui.painter().text(
         egui::pos2(msg_x, row.center().y),
@@ -546,12 +546,13 @@ fn paint_branch_row(ui: &egui::Ui, row: egui::Rect, branch: &crate::state::Manag
         muted,
     );
 
-    let author_x = row.right() - 180.0;
+    let author_x = row.right() - 220.0;
     paint_avatar(ui, egui::pos2(author_x, row.center().y), &branch.author);
+    let display_author = truncate(&branch.author, 85.0);
     ui.painter().text(
         egui::pos2(author_x + 22.0, row.center().y),
         egui::Align2::LEFT_CENTER,
-        &branch.author,
+        &display_author,
         egui::FontId::proportional(11.0),
         text,
     );
@@ -586,12 +587,13 @@ fn paint_tag_row(ui: &egui::Ui, row: egui::Rect, tag: &crate::state::ManagerTag)
         text,
     );
 
-    let author_x = row.right() - 180.0;
+    let author_x = row.right() - 220.0;
     paint_avatar(ui, egui::pos2(author_x, row.center().y), &tag.author);
+    let display_author = truncate(&tag.author, 85.0);
     ui.painter().text(
         egui::pos2(author_x + 22.0, row.center().y),
         egui::Align2::LEFT_CENTER,
-        &tag.author,
+        &display_author,
         egui::FontId::proportional(11.0),
         text,
     );
@@ -619,7 +621,7 @@ fn paint_commit_row(ui: &egui::Ui, row: egui::Rect, commit: &crate::state::Manag
         muted,
     );
 
-    let max_msg_width = row.width() - 200.0;
+    let max_msg_width = row.width() - 240.0;
     let display_msg = truncate(&commit.message, max_msg_width);
     ui.painter().text(
         egui::pos2(row.left() + 28.0, row.center().y),
@@ -629,12 +631,13 @@ fn paint_commit_row(ui: &egui::Ui, row: egui::Rect, commit: &crate::state::Manag
         text,
     );
 
-    let author_x = row.right() - 180.0;
+    let author_x = row.right() - 220.0;
     paint_avatar(ui, egui::pos2(author_x, row.center().y), &commit.author);
+    let display_author = truncate(&commit.author, 85.0);
     ui.painter().text(
         egui::pos2(author_x + 22.0, row.center().y),
         egui::Align2::LEFT_CENTER,
-        &commit.author,
+        &display_author,
         egui::FontId::proportional(11.0),
         text,
     );

@@ -48,17 +48,41 @@ pub fn format_relative_time(secs: i64) -> String {
     }
 }
 
+fn normalize_github_url(url: &str) -> Option<String> {
+    let input = url.trim();
+    if input.starts_with("git@github.com:") {
+        let path = input.strip_prefix("git@github.com:")?;
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let path = path.trim_matches('/');
+        let mut parts = path.split('/');
+        let org = parts.next()?;
+        let repo = parts.next()?;
+        if !org.is_empty() && !repo.is_empty() {
+            return Some(format!("https://github.com/{}/{}", org, repo));
+        }
+    } else if let Ok(parsed) = url::Url::parse(input) {
+        if parsed.host_str() == Some("github.com") {
+            let path = parsed.path().trim_matches('/');
+            let path = path.strip_suffix(".git").unwrap_or(path);
+            let mut parts = path.split('/');
+            let org = parts.next()?;
+            let repo = parts.next()?;
+            if !org.is_empty() && !repo.is_empty() {
+                return Some(format!("https://github.com/{}/{}", org, repo));
+            }
+        }
+    }
+    None
+}
+
 pub fn is_github_url(url: &str) -> bool {
-    url.contains("github.com")
+    normalize_github_url(url).is_some()
 }
 
 pub fn github_links(url: &str) -> Option<(String, String, String)> {
-    if !is_github_url(url) {
-        return None;
-    }
-    let base = url.trim_end_matches(".git");
+    let base = normalize_github_url(url)?;
     Some((
-        base.to_string(),
+        base.clone(),
         format!("{}/issues", base),
         format!("{}/pulls", base),
     ))
@@ -158,5 +182,27 @@ mod tests {
     #[test]
     fn test_github_links_returns_none_for_non_github() {
         assert!(github_links("https://gitlab.com/user/repo").is_none());
+    }
+
+    #[test]
+    fn test_normalize_github_url_robust() {
+        assert_eq!(
+            normalize_github_url("https://github.com/user/repo"),
+            Some("https://github.com/user/repo".to_string())
+        );
+        assert_eq!(
+            normalize_github_url("git@github.com:user/repo.git"),
+            Some("https://github.com/user/repo".to_string())
+        );
+        assert_eq!(
+            normalize_github_url("git@github.com:user/repo/"),
+            Some("https://github.com/user/repo".to_string())
+        );
+        assert_eq!(
+            normalize_github_url("https://github.com/user/repo.git"),
+            Some("https://github.com/user/repo".to_string())
+        );
+        assert_eq!(normalize_github_url("https://github.com/user"), None);
+        assert_eq!(normalize_github_url("github.com/user/repo"), None);
     }
 }
