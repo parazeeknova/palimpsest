@@ -619,10 +619,10 @@ impl GitRepo {
             .shorthand()
             .ok_or_else(|| GitError::Git("Cannot pull from detached HEAD".to_string()))?;
         let mut remote = self.repo.find_remote(remote_name)?;
-        let remote_ref = format!("refs/remotes/{remote_name}/{branch_name}");
+        let remote_branch = format!("refs/remotes/{remote_name}/{branch_name}");
         let refspec = format!("refs/heads/{branch_name}:refs/remotes/{remote_name}/{branch_name}");
         remote.fetch(&[&refspec], None, None)?;
-        let fetch_commit = self.repo.find_reference(&remote_ref)?.peel_to_commit()?;
+        let fetch_commit = self.repo.find_reference(&remote_branch)?.peel_to_commit()?;
         let refname = format!("refs/heads/{}", branch_name);
         let mut local_ref = self.repo.find_reference(&refname)?;
         let local_commit = local_ref.peel_to_commit()?;

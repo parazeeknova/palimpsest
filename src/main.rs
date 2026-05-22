@@ -106,8 +106,7 @@ impl PalimpsestApp {
 
     fn restore_active_repo_from_state(&mut self) {
         let state = self.store.get_state();
-        if state.current_repo.is_some() {
-            let path = state.current_repo.clone().unwrap();
+        if let Some(path) = state.current_repo.clone() {
             if self.git_repo.is_none() {
                 self.open_repo(&path);
             }

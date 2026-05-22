@@ -110,7 +110,7 @@ impl AppSession {
         }
     }
 
-    pub fn save(&self) {
+    pub fn save(self) {
         let Some(path) = Self::session_path() else {
             tracing::warn!("Unable to resolve storage directory for persisted session");
             return;
@@ -123,7 +123,7 @@ impl AppSession {
             }
         }
 
-        let serialized = match serde_json::to_string_pretty(&self.clone().normalize()) {
+        let serialized = match serde_json::to_string_pretty(&self.normalize()) {
             Ok(serialized) => serialized,
             Err(error) => {
                 tracing::warn!(error = %error, "Failed to serialize session");

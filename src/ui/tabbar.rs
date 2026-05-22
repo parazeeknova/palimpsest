@@ -1,5 +1,6 @@
 use eframe::egui;
 use egui_phosphor::regular::{GIT_BRANCH, PLUS, X};
+use std::path::{Component, Path};
 
 use crate::state::AppState;
 
@@ -244,12 +245,18 @@ fn truncate_path_display(path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }
-    let parts: Vec<&str> = path.split(std::path::MAIN_SEPARATOR).collect();
+    let parts: Vec<String> = Path::new(path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
     if parts.len() <= 2 {
         truncate_chars(path, 20)
     } else {
-        let first = parts.first().copied().unwrap_or("");
-        let last = parts.last().copied().unwrap_or("");
+        let first = parts.first().map(|s| s.as_str()).unwrap_or("");
+        let last = parts.last().map(|s| s.as_str()).unwrap_or("");
         let combined = format!("{}/…/{}", first, last);
         if combined.chars().count() > 24 {
             let last_truncated = truncate_chars(last, 14);
