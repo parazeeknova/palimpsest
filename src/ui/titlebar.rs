@@ -1,13 +1,28 @@
 use eframe::egui;
 use egui_phosphor::regular::{
-    ARROW_LEFT, ARROW_RIGHT, GEAR_SIX, LIST, MAGNIFYING_GLASS, MINUS, SQUARE, USER_CIRCLE, X,
+    ARROW_LEFT, ARROW_RIGHT, ARROW_UP_RIGHT, CLOCK, FOLDER, FOLDER_OPEN, GEAR_SIX, GITHUB_LOGO,
+    GLOBE_SIMPLE, LIST, MAGNIFYING_GLASS, MINUS, POWER, SQUARE, TERMINAL_WINDOW, USER_CIRCLE, X,
 };
+
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", "start", "", url])
+        .spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
 
 pub enum OpenAction {
     None,
     PickFolder,
     SelectRecent(usize),
 }
+
+use crate::state::RecentRepo;
+use crate::ui::repo_manager::format_relative_time;
 
 #[allow(clippy::too_many_arguments)]
 pub fn show(
@@ -16,7 +31,7 @@ pub fn show(
     menu_open: &mut bool,
     search_query: &mut String,
     repo_name: Option<&str>,
-    recent_repos: &[String],
+    recent_repos: &[RecentRepo],
     show_window_buttons: &mut bool,
     debug_open: &mut bool,
 ) -> OpenAction {
@@ -59,49 +74,148 @@ pub fn show(
 
             if *menu_open {
                 ui.horizontal(|ui| {
-                    ui.menu_button(egui::RichText::new("File").size(12.0), |ui| {
-                        if ui.button("Open repository").clicked() {
+                    let file_resp = ui.menu_button(egui::RichText::new("File").size(12.0), |ui| {
+                        ui.set_max_width(200.0);
+                        if ui
+                            .button(
+                                egui::RichText::new(format!("{}  Open repository", FOLDER_OPEN))
+                                    .size(12.0),
+                            )
+                            .clicked()
+                        {
                             action = OpenAction::PickFolder;
                             ui.close();
                         }
                         if !recent_repos.is_empty() {
-                            ui.menu_button(egui::RichText::new("Recents").size(12.0), |ui| {
-                                for (i, path) in recent_repos.iter().enumerate() {
-                                    let name = repo_display_name(path);
-                                    if ui.button(name).clicked() {
-                                        action = OpenAction::SelectRecent(i);
-                                        ui.close();
+                            ui.menu_button(
+                                egui::RichText::new(format!("{}  Recents", CLOCK)).size(12.0),
+                                |ui| {
+                                    ui.set_max_width(220.0);
+                                    ui.label(
+                                        egui::RichText::new("Recent repositories")
+                                            .size(11.0)
+                                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                                    );
+                                    ui.separator();
+                                    for (i, repo) in recent_repos.iter().enumerate() {
+                                        let name = repo_display_name(&repo.path);
+                                        let time_ago =
+                                            format_relative_time(repo.last_opened as i64);
+                                        if ui
+                                            .button(
+                                                egui::RichText::new(format!(
+                                                    "{}  {}  {}",
+                                                    FOLDER, name, time_ago
+                                                ))
+                                                .size(12.0),
+                                            )
+                                            .clicked()
+                                        {
+                                            action = OpenAction::SelectRecent(i);
+                                            ui.close();
+                                        }
                                     }
-                                }
-                            });
+                                },
+                            );
                         }
-                        if ui.button("Exit").clicked() {
+                        if ui
+                            .button(egui::RichText::new(format!("{}  Exit", POWER)).size(12.0))
+                            .clicked()
+                        {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
-
-                    ui.menu_button(egui::RichText::new("Window").size(12.0), |ui| {
-                        ui.checkbox(show_window_buttons, "Show window buttons");
-                    });
-
-                    if ui.button(egui::RichText::new("Debug").size(12.0)).clicked() {
-                        *debug_open = !*debug_open;
+                    if file_resp.response.hovered() || file_resp.inner.is_some() {
+                        ui.painter().rect_filled(
+                            file_resp.response.rect,
+                            2.0,
+                            egui::Color32::from_white_alpha(30),
+                        );
                     }
 
-                    ui.menu_button(egui::RichText::new("Help").size(12.0), |ui| {
-                        ui.label("Palimpsest");
-                        ui.label("Local-first git client");
-                        ui.separator();
-                        if ui
-                            .hyperlink_to("GitHub", "https://github.com/parazeeknova/palimpsest")
-                            .clicked()
-                        {
+                    let window_resp =
+                        ui.menu_button(egui::RichText::new("Window").size(12.0), |ui| {
+                            ui.set_max_width(200.0);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(TERMINAL_WINDOW).size(12.0));
+                                ui.label("Show window buttons");
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.checkbox(show_window_buttons, "");
+                                    },
+                                );
+                            });
+                        });
+                    if window_resp.response.hovered() || window_resp.inner.is_some() {
+                        ui.painter().rect_filled(
+                            window_resp.response.rect,
+                            2.0,
+                            egui::Color32::from_white_alpha(30),
+                        );
+                    }
+
+                    let debug_resp =
+                        ui.menu_button(egui::RichText::new("Debug").size(12.0), |ui| {
+                            ui.set_max_width(200.0);
+                            if ui
+                                .button(
+                                    egui::RichText::new(format!("{}  Open Logs", TERMINAL_WINDOW))
+                                        .size(12.0),
+                                )
+                                .clicked()
+                            {
+                                *debug_open = true;
+                                ui.close();
+                            }
+                        });
+                    if debug_resp.response.hovered() || debug_resp.inner.is_some() {
+                        ui.painter().rect_filled(
+                            debug_resp.response.rect,
+                            2.0,
+                            egui::Color32::from_white_alpha(30),
+                        );
+                    }
+
+                    let help_resp = ui.menu_button(egui::RichText::new("Help").size(12.0), |ui| {
+                        ui.set_max_width(220.0);
+                        let github_resp = ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(GITHUB_LOGO).size(12.0));
+                            ui.label(egui::RichText::new("Visit GitHub").size(12.0));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(egui::RichText::new(ARROW_UP_RIGHT).size(10.0));
+                                },
+                            );
+                        });
+                        if github_resp.response.clicked() {
+                            open_url("https://github.com/parazeeknova/palimpsest");
                             ui.close();
                         }
-                        if ui.hyperlink_to("Author", "https://przknv.cc").clicked() {
+
+                        let author_resp = ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(GLOBE_SIMPLE).size(12.0));
+                            ui.label(egui::RichText::new("Visit Author").size(12.0));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(egui::RichText::new(ARROW_UP_RIGHT).size(10.0));
+                                },
+                            );
+                        });
+                        if author_resp.response.clicked() {
+                            open_url("https://przknv.cc");
                             ui.close();
                         }
                     });
+                    if help_resp.response.hovered() || help_resp.inner.is_some() {
+                        ui.painter().rect_filled(
+                            help_resp.response.rect,
+                            2.0,
+                            egui::Color32::from_white_alpha(30),
+                        );
+                    }
                 });
             }
 

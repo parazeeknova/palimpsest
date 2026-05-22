@@ -27,6 +27,15 @@ pub fn show_cached(ui: &mut egui::Ui, repo_name: Option<&str>, app_state: &AppSt
     ui.painter()
         .line_segment([rect.right_top(), rect.right_bottom()], stroke);
 
+    if app_state.current_repo.is_none() {
+        let logo = egui::Image::new(egui::include_image!("../assets/logo.svg"))
+            .tint(egui::Color32::from_white_alpha(25))
+            .fit_to_exact_size(egui::vec2(120.0, 120.0));
+        let logo_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(120.0, 120.0));
+        ui.put(logo_rect, logo);
+        return;
+    }
+
     let mut y = rect.top();
     paint_header(ui, rect, y, text, stroke, repo_name);
     y += HEADER_HEIGHT;
@@ -42,72 +51,65 @@ pub fn show_cached(ui: &mut egui::Ui, repo_name: Option<&str>, app_state: &AppSt
     paint_filter(ui, rect, y, muted, stroke);
     y += FILTER_HEIGHT + 12.0;
 
-    if app_state.current_repo.is_some() {
-        let local: Vec<_> = app_state
-            .cached_branches
-            .iter()
-            .filter(|b| !b.is_remote)
-            .collect();
-        let remote: Vec<_> = app_state
-            .cached_branches
-            .iter()
-            .filter(|b| b.is_remote)
-            .collect();
+    let local: Vec<_> = app_state
+        .cached_branches
+        .iter()
+        .filter(|b| !b.is_remote)
+        .collect();
+    let remote: Vec<_> = app_state
+        .cached_branches
+        .iter()
+        .filter(|b| b.is_remote)
+        .collect();
 
-        if !local.is_empty() {
-            paint_section(ui, rect, y, "Branches", text);
-            y += ROW_HEIGHT;
-            for branch in &local {
-                let icon = if branch.is_current { CHECK } else { FOLDER };
-                paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    icon,
-                    &branch.name,
-                    branch.is_current,
-                    text,
-                    muted,
-                    None,
-                );
-                y += ROW_HEIGHT;
-            }
-        }
-
-        if !remote.is_empty() {
-            paint_section(ui, rect, y, "Remotes", text);
-            y += ROW_HEIGHT;
-            for branch in &remote {
-                paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    GITHUB_LOGO,
-                    &branch.name,
-                    false,
-                    text,
-                    muted,
-                    None,
-                );
-                y += ROW_HEIGHT;
-            }
-        }
-
-        if !app_state.cached_remotes.is_empty() {
-            y += 4.0;
-        }
-
-        if !app_state.cached_tags.is_empty() {
-            paint_collapsed_section(ui, rect, y, "Tags", text);
+    if !local.is_empty() {
+        paint_section(ui, rect, y, "Branches", text);
+        y += ROW_HEIGHT;
+        for branch in &local {
+            let icon = if branch.is_current { CHECK } else { FOLDER };
+            paint_tree_row(
+                ui,
+                rect,
+                y,
+                1,
+                icon,
+                &branch.name,
+                branch.is_current,
+                text,
+                muted,
+                None,
+            );
             y += ROW_HEIGHT;
         }
-    } else {
-        for title in ["Branches", "Remotes", "Tags", "Stashes", "Submodules"] {
-            paint_collapsed_section(ui, rect, y, title, text);
+    }
+
+    if !remote.is_empty() {
+        paint_section(ui, rect, y, "Remotes", text);
+        y += ROW_HEIGHT;
+        for branch in &remote {
+            paint_tree_row(
+                ui,
+                rect,
+                y,
+                1,
+                GITHUB_LOGO,
+                &branch.name,
+                false,
+                text,
+                muted,
+                None,
+            );
             y += ROW_HEIGHT;
         }
+    }
+
+    if !app_state.cached_remotes.is_empty() {
+        y += 4.0;
+    }
+
+    if !app_state.cached_tags.is_empty() {
+        paint_collapsed_section(ui, rect, y, "Tags", text);
+        y += ROW_HEIGHT;
     }
 }
 

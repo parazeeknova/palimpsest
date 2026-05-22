@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui_phosphor::regular::{
     ARROW_CLOCKWISE, ARROW_COUNTER_CLOCKWISE, ARROWS_CLOCKWISE, BROWSERS, CARET_DOWN, FOLDER,
-    GIT_BRANCH, GIT_FORK, GIT_PULL_REQUEST, LIST, SIDEBAR, SMILEY, STACK, TERMINAL_WINDOW,
+    GIT_BRANCH, GIT_FORK, GIT_PULL_REQUEST, SIDEBAR, STACK, TERMINAL_WINDOW, TEXT_ALIGN_LEFT,
 };
 
 const TOOLBAR_HEIGHT: f32 = 46.0;
@@ -12,7 +12,7 @@ const ACTION_HEIGHT: f32 = 34.0;
 const LEFT_ACTIONS: f32 = QUICK_ACTION_WIDTH + ACTION_WIDTH * 4.0;
 const RIGHT_ACTIONS: f32 = ACTION_WIDTH * 6.0;
 
-pub fn show(ui: &mut egui::Ui, repo_name: Option<&str>, current_branch: Option<&str>) {
+pub fn show(ui: &mut egui::Ui, repo_name: Option<&str>, current_branch: Option<&str>) -> bool {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, TOOLBAR_HEIGHT), egui::Sense::hover());
 
@@ -35,13 +35,14 @@ pub fn show(ui: &mut egui::Ui, repo_name: Option<&str>, current_branch: Option<&
         stroke,
     );
 
-    child_ui(
+    let quick_launch_clicked = child_ui(
         ui,
         left_rect.shrink2(egui::vec2(8.0, 3.0)),
         "toolbar_left",
         egui::Layout::left_to_right(egui::Align::Center),
         left_panel,
-    );
+    )
+    .inner;
     child_ui(
         ui,
         center_rect.shrink2(egui::vec2(8.0, 2.0)),
@@ -56,6 +57,7 @@ pub fn show(ui: &mut egui::Ui, repo_name: Option<&str>, current_branch: Option<&
         egui::Layout::right_to_left(egui::Align::Center),
         right_panel,
     );
+    quick_launch_clicked
 }
 
 fn section_rects(rect: egui::Rect) -> (egui::Rect, egui::Rect, egui::Rect) {
@@ -95,60 +97,91 @@ fn child_ui<R>(
     )
 }
 
-fn left_panel(ui: &mut egui::Ui) {
+fn left_panel(ui: &mut egui::Ui) -> bool {
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-    toolbar_button(ui, QUICK_ACTION_WIDTH, FOLDER, "Quick Launch", None);
+    let quick_launch_clicked = toolbar_button(ui, QUICK_ACTION_WIDTH, FOLDER, "Quick Launch", None);
     toolbar_button(ui, ACTION_WIDTH, ARROW_COUNTER_CLOCKWISE, "Fetch", None);
     toolbar_button(ui, ACTION_WIDTH, ARROW_CLOCKWISE, "Pull", None);
     toolbar_button(ui, ACTION_WIDTH, GIT_PULL_REQUEST, "Push", None);
-    stash_button(ui);
+    toolbar_menu_button(ui, ACTION_WIDTH, STACK, "Stash", Some(CARET_DOWN), |ui| {
+        drop(ui.button("Stash changes"));
+        drop(ui.button("Apply stash"));
+        drop(ui.button("Pop stash"));
+    });
+    quick_launch_clicked
 }
 
 fn center_panel(ui: &mut egui::Ui, repo_name: Option<&str>, current_branch: Option<&str>) {
     let rect = ui.max_rect();
-    let group_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(160.0, ACTION_HEIGHT));
-    let icon_rect =
-        egui::Rect::from_min_size(group_rect.left_top(), egui::vec2(30.0, ACTION_HEIGHT));
+    let group_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, ACTION_HEIGHT));
     let text_rect = egui::Rect::from_min_size(
-        egui::pos2(icon_rect.right() + 8.0, group_rect.top()),
-        egui::vec2(122.0, ACTION_HEIGHT),
+        egui::pos2(group_rect.left() + 8.0, group_rect.top()),
+        egui::vec2(184.0, ACTION_HEIGHT),
     );
 
-    child_ui(
-        ui,
-        icon_rect,
-        "toolbar_center_icon",
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.add_sized(
-                [28.0, ACTION_HEIGHT],
-                egui::Label::new(egui::RichText::new(LIST).size(14.0)),
-            );
-        },
+    let menu_icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.bottom() - 20.0),
+        egui::vec2(16.0, 16.0),
+    );
+    ui.painter().text(
+        menu_icon_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        TEXT_ALIGN_LEFT,
+        egui::FontId::proportional(14.0),
+        ui.visuals().text_color(),
     );
 
     child_ui(
         ui,
         text_rect,
         "toolbar_center_text",
-        egui::Layout::top_down(egui::Align::Min),
+        egui::Layout::top_down(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-            let label = repo_name.unwrap_or("no repository");
-            ui.label(egui::RichText::new(label).size(13.0).strong());
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-                ui.label(egui::RichText::new(GIT_BRANCH).size(11.0));
+            if let Some(name) = repo_name {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(name).size(13.0).strong())
+                        .truncate()
+                        .halign(egui::Align::Center),
+                );
                 let branch_name = current_branch.unwrap_or("no branch");
-                ui.label(egui::RichText::new(branch_name).size(10.0));
-            });
+                let branch_text = format!("{} {}", GIT_BRANCH, branch_name);
+                ui.add_space(3.0);
+                let mut rich_text = egui::RichText::new(branch_text).size(10.0);
+                if ui.rect_contains_pointer(text_rect) {
+                    rich_text = rich_text.underline();
+                }
+                ui.add(
+                    egui::Label::new(rich_text)
+                        .truncate()
+                        .halign(egui::Align::Center),
+                );
+            } else {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Welcome to Palimpsest!")
+                            .size(12.0)
+                            .strong(),
+                    )
+                    .truncate()
+                    .halign(egui::Align::Center),
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Open a repo to start")
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                    )
+                    .truncate()
+                    .halign(egui::Align::Center),
+                );
+            }
         },
     );
 }
 
 fn right_panel(ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-    toolbar_button(ui, ACTION_WIDTH, SMILEY, "Feedback", None);
     toolbar_button(ui, ACTION_WIDTH, BROWSERS, "Workspace", Some(CARET_DOWN));
     toolbar_button(ui, ACTION_WIDTH, SIDEBAR, "Appearance", Some(CARET_DOWN));
     toolbar_button(ui, ACTION_WIDTH, TERMINAL_WINDOW, "Console", None);
@@ -162,8 +195,14 @@ fn right_panel(ui: &mut egui::Ui) {
     toolbar_button(ui, ACTION_WIDTH, GIT_FORK, "New Branch", None);
 }
 
-fn toolbar_button(ui: &mut egui::Ui, width: f32, icon: &str, label: &str, suffix: Option<&str>) {
-    ui.allocate_ui_with_layout(
+fn toolbar_button(
+    ui: &mut egui::Ui,
+    width: f32,
+    icon: &str,
+    label: &str,
+    suffix: Option<&str>,
+) -> bool {
+    let response = ui.allocate_ui_with_layout(
         egui::vec2(width, ACTION_HEIGHT),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
@@ -185,31 +224,63 @@ fn toolbar_button(ui: &mut egui::Ui, width: f32, icon: &str, label: &str, suffix
             );
         },
     );
+    let interacted = response.response.interact(egui::Sense::click());
+    if interacted.hovered() {
+        ui.painter().rect_filled(
+            response.response.rect,
+            4.0,
+            egui::Color32::from_white_alpha(18),
+        );
+    }
+    interacted.clicked()
 }
 
-fn stash_button(ui: &mut egui::Ui) {
-    ui.allocate_ui_with_layout(
-        egui::vec2(ACTION_WIDTH, ACTION_HEIGHT),
+fn toolbar_menu_button(
+    ui: &mut egui::Ui,
+    width: f32,
+    icon: &str,
+    label: &str,
+    suffix: Option<&str>,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) {
+    let response = ui.allocate_ui_with_layout(
+        egui::vec2(width, ACTION_HEIGHT),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-            ui.menu_button(
-                egui::RichText::new(format!("{STACK}  {CARET_DOWN}")).size(15.0),
-                |ui| {
-                    drop(ui.button("Stash changes"));
-                    drop(ui.button("Apply stash"));
-                    drop(ui.button("Pop stash"));
+            ui.add_sized(
+                [width, 20.0],
+                IconRow {
+                    icon,
+                    suffix,
+                    icon_size: 16.0,
                 },
             );
             ui.add_sized(
-                [ACTION_WIDTH, 12.0],
+                [width, 12.0],
                 CenteredText {
-                    text: "Stash",
+                    text: label,
                     size: 10.0,
                 },
             );
         },
     );
+
+    let popup_id = response.response.id.with("popup");
+    let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+
+    let interacted = response.response.interact(egui::Sense::click());
+    if interacted.hovered() || is_open {
+        ui.painter().rect_filled(
+            response.response.rect,
+            4.0,
+            egui::Color32::from_white_alpha(18),
+        );
+    }
+
+    egui::Popup::menu(&response.response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(add_contents);
 }
 
 struct IconRow<'a> {

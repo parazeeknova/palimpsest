@@ -39,22 +39,50 @@ impl GitRepo {
         }
     }
 
-    pub fn commits(&self, limit: usize) -> Result<Vec<Commit>, GitError> {
+    pub fn commits(&self, limit: Option<usize>) -> Result<Vec<Commit>, GitError> {
         let mut revwalk = self.repo.revwalk()?;
         revwalk.set_sorting(Sort::TOPOLOGICAL)?;
         revwalk.push_head()?;
 
-        let commits: Vec<Commit> = revwalk
-            .take(limit)
-            .map(|oid_result| {
-                let oid = oid_result?;
-                let commit = self.repo.find_commit(oid)?;
-                Ok(self.commit_from_git2(&commit))
-            })
-            .collect::<Result<Vec<_>, git2::Error>>()?;
+        let mut commits = Vec::new();
+        for oid_result in revwalk {
+            if let Some(l) = limit {
+                if commits.len() >= l {
+                    break;
+                }
+            }
+            let oid = oid_result?;
+            let commit = self.repo.find_commit(oid)?;
+            commits.push(self.commit_from_git2(&commit));
+        }
 
         tracing::info!(count = commits.len(), "Commits fetched");
         Ok(commits)
+    }
+
+    pub fn history_stats(&self) -> Result<(usize, Option<Commit>), GitError> {
+        let mut revwalk = self.repo.revwalk()?;
+        revwalk.set_sorting(Sort::TOPOLOGICAL)?;
+        if revwalk.push_head().is_err() {
+            return Ok((0, None));
+        }
+
+        let mut count = 0;
+        let mut last_oid = None;
+        for oid_result in revwalk {
+            let oid = oid_result?;
+            last_oid = Some(oid);
+            count += 1;
+        }
+
+        let oldest_commit = if let Some(oid) = last_oid {
+            let commit = self.repo.find_commit(oid)?;
+            Some(self.commit_from_git2(&commit))
+        } else {
+            None
+        };
+
+        Ok((count, oldest_commit))
     }
 
     pub fn branches(&self) -> Result<Vec<Branch>, GitError> {
@@ -127,9 +155,31 @@ impl GitRepo {
             .map(|name| {
                 let oid = self.repo.revparse_single(&format!("refs/tags/{}", name))?;
                 let target = oid.peel_to_commit()?;
+                let (author, timestamp) = if let Ok(tag) = self.repo.find_tag(oid.id()) {
+                    if let Some(tagger) = tag.tagger() {
+                        (
+                            tagger.name().unwrap_or("Unknown").to_string(),
+                            secs_to_system_time(tagger.when().seconds()),
+                        )
+                    } else {
+                        let author = target.author();
+                        (
+                            author.name().unwrap_or("Unknown").to_string(),
+                            secs_to_system_time(author.when().seconds()),
+                        )
+                    }
+                } else {
+                    let author = target.author();
+                    (
+                        author.name().unwrap_or("Unknown").to_string(),
+                        secs_to_system_time(author.when().seconds()),
+                    )
+                };
                 Ok(Tag {
                     name: name.to_string(),
                     target_hash: target.id().to_string()[..7].to_string(),
+                    author,
+                    timestamp,
                 })
             })
             .collect::<Result<Vec<_>, git2::Error>>()?;
@@ -576,6 +626,140 @@ impl GitRepo {
             )))
         }
     }
+
+    fn resolve_upstream_or_fallback(&self) -> Result<(String, String, bool), GitError> {
+        let mut remote_name = None;
+        let mut remote_branch = None;
+        let mut has_upstream = false;
+
+        if let Ok(head) = self.repo.head() {
+            if head.is_branch() {
+                if let Ok(local_ref_name) = head.name() {
+                    if let (Ok(remote_buf), Ok(merge_buf)) = (
+                        self.repo.branch_upstream_remote(local_ref_name),
+                        self.repo.branch_upstream_merge(local_ref_name),
+                    ) {
+                        if let (Ok(r), Ok(m)) = (remote_buf.as_str(), merge_buf.as_str()) {
+                            remote_name = Some(r.to_string());
+                            let branch_part = if let Some(stripped) = m.strip_prefix("refs/heads/")
+                            {
+                                stripped.to_string()
+                            } else {
+                                m.to_string()
+                            };
+                            remote_branch = Some(branch_part);
+                            has_upstream = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let remote_name = match remote_name {
+            Some(r) => r,
+            None => {
+                let remotes = self.repo.remotes()?;
+                match remotes.get(0) {
+                    Ok(Some(name)) => name.to_string(),
+                    Ok(None) | Err(_) => {
+                        return Err(GitError::Git("No remotes configured".to_string()));
+                    }
+                }
+            }
+        };
+
+        let remote_branch = match remote_branch {
+            Some(b) => b,
+            None => {
+                if let Ok(head) = self.repo.head() {
+                    if head.is_branch() {
+                        head.shorthand().unwrap_or("main").to_string()
+                    } else {
+                        "main".to_string()
+                    }
+                } else {
+                    "main".to_string()
+                }
+            }
+        };
+
+        Ok((remote_name, remote_branch, has_upstream))
+    }
+
+    pub fn fetch(&self) -> Result<(), GitError> {
+        let (remote_name, remote_branch, has_upstream) = self.resolve_upstream_or_fallback()?;
+        let mut remote = self.repo.find_remote(&remote_name)?;
+        if has_upstream {
+            let refspec =
+                format!("refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
+            remote.fetch(&[&refspec], None, None)?;
+        } else {
+            remote.fetch(&[] as &[&str], None, None)?;
+        }
+        Ok(())
+    }
+
+    pub fn pull(&self) -> Result<(), GitError> {
+        let head = self.repo.head()?;
+        if !head.is_branch() {
+            return Err(GitError::Git("Cannot pull from detached HEAD".to_string()));
+        }
+        let branch_name = head.shorthand()?;
+        let (remote_name, remote_branch, _has_upstream) = self.resolve_upstream_or_fallback()?;
+        let mut remote = self.repo.find_remote(&remote_name)?;
+        let refspec =
+            format!("refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
+        remote.fetch(&[&refspec], None, None)?;
+        let remote_ref_name = format!("refs/remotes/{remote_name}/{remote_branch}");
+        let remote_ref = self.repo.find_reference(&remote_ref_name)?;
+        let remote_commit = remote_ref.peel_to_commit()?;
+        let refname = format!("refs/heads/{}", branch_name);
+        let mut local_ref = self.repo.find_reference(&refname)?;
+        let local_commit = local_ref.peel_to_commit()?;
+        let ancestor = self
+            .repo
+            .merge_base(local_commit.id(), remote_commit.id())?;
+        if ancestor == remote_commit.id() {
+            return Ok(());
+        }
+        if ancestor != local_commit.id() {
+            return Err(GitError::Git(
+                "Local and remote histories have diverged. Requires explicit merge or rebase."
+                    .to_string(),
+            ));
+        }
+
+        let mut status_opts = StatusOptions::new();
+        status_opts.include_untracked(true);
+        status_opts.renames_head_to_index(true);
+        status_opts.renames_index_to_workdir(true);
+        if !self.repo.statuses(Some(&mut status_opts))?.is_empty() {
+            return Err(GitError::Git(
+                "Cannot fast-forward pull with uncommitted changes".to_string(),
+            ));
+        }
+
+        let tree = self.repo.find_commit(remote_commit.id())?.tree()?;
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        checkout_opts.force();
+        self.repo
+            .checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
+        local_ref.set_target(remote_commit.id(), "pull: Fast-forward")?;
+        Ok(())
+    }
+
+    pub fn push(&self) -> Result<(), GitError> {
+        let head = self.repo.head()?;
+        if !head.is_branch() {
+            return Err(GitError::Git("Cannot push from detached HEAD".to_string()));
+        }
+        let branch_name = head.shorthand()?;
+        let (remote_name, remote_branch, _has_upstream) = self.resolve_upstream_or_fallback()?;
+        let refspec = format!("refs/heads/{}:refs/heads/{}", branch_name, remote_branch);
+        let mut remote = self.repo.find_remote(&remote_name)?;
+        remote.push(&[&refspec], None)?;
+        Ok(())
+    }
 }
 
 fn secs_to_system_time(secs: i64) -> SystemTime {
@@ -583,5 +767,66 @@ fn secs_to_system_time(secs: i64) -> SystemTime {
         SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
     } else {
         SystemTime::UNIX_EPOCH
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_commits_limit_zero_and_history_stats() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "palimpsest_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let repo = git2::Repository::init(&temp_dir).unwrap();
+        let git_repo = GitRepo::open(temp_dir.to_str().unwrap()).unwrap();
+
+        // With no commits, history stats should be zero
+        let (count, oldest) = git_repo.history_stats().unwrap();
+        assert_eq!(count, 0);
+        assert!(oldest.is_none());
+
+        // commits() on an empty repo will return an Err because HEAD points to a non-existent ref
+        assert!(git_repo.commits(Some(0)).is_err());
+        assert!(git_repo.commits(None).is_err());
+
+        // Create a commit
+        let signature = git2::Signature::now("Test User", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+
+        let oid = repo
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Initial commit",
+                &tree,
+                &[],
+            )
+            .unwrap();
+
+        // Test commits(Some(0)) returns 0 commits
+        let commits = git_repo.commits(Some(0)).unwrap();
+        assert_eq!(commits.len(), 0);
+
+        // Test commits(Some(1)) returns 1 commit
+        let commits_one = git_repo.commits(Some(1)).unwrap();
+        assert_eq!(commits_one.len(), 1);
+        assert_eq!(commits_one[0].hash, oid.to_string());
+
+        // Test history_stats returns (1, Some(commit))
+        let (count, oldest) = git_repo.history_stats().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(oldest.unwrap().hash, oid.to_string());
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
     }
 }

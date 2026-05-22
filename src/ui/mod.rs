@@ -1,5 +1,9 @@
 pub mod body;
+pub mod command_palette;
 pub mod commit_panel;
+pub mod repo_manager;
+pub mod repo_manager_body;
+pub mod repo_manager_sidebar;
 pub mod sidebar;
 pub mod tabbar;
 pub mod titlebar;
