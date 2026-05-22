@@ -139,8 +139,29 @@ impl AppSession {
 
         if let Err(error) = fs::rename(&temp_path, &path) {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
-                if let Err(error) = fs::rename(&temp_path, &path) {
-                    tracing::warn!(from = %temp_path.display(), to = %path.display(), error = %error, "Failed to commit session file");
+                let remove_res = fs::remove_file(&path);
+                let can_retry = match &remove_res {
+                    Ok(()) => true,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                    Err(_) => false,
+                };
+
+                if can_retry {
+                    if let Err(retry_error) = fs::rename(&temp_path, &path) {
+                        tracing::warn!(
+                            from = %temp_path.display(),
+                            to = %path.display(),
+                            error = %retry_error,
+                            "Failed to rename temp file to destination after attempting removal of existing file"
+                        );
+                    }
+                } else if let Err(remove_error) = remove_res {
+                    tracing::warn!(
+                        path = %path.display(),
+                        temp_path = %temp_path.display(),
+                        error = %remove_error,
+                        "Failed to remove existing file during rename retry"
+                    );
                 }
             } else {
                 tracing::warn!(from = %temp_path.display(), to = %path.display(), error = %error, "Failed to commit session file");

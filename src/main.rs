@@ -359,18 +359,22 @@ impl PalimpsestApp {
             let repo = match GitRepo::open(&current_repo_path) {
                 Ok(r) => r,
                 Err(e) => {
-                    store.dispatch(AppAction::SetRepoError(Some(format!(
-                        "Failed to open repo: {}",
-                        e
-                    ))));
-                    ctx.request_repaint();
+                    if store.get_state().current_repo.as_ref() == Some(&current_repo_path) {
+                        store.dispatch(AppAction::SetRepoError(Some(format!(
+                            "Failed to open repo: {}",
+                            e
+                        ))));
+                        ctx.request_repaint();
+                    }
                     return;
                 }
             };
 
             if let Err(e) = f(&repo) {
-                store.dispatch(AppAction::SetRepoError(Some(e.to_string())));
-                ctx.request_repaint();
+                if store.get_state().current_repo.as_ref() == Some(&current_repo_path) {
+                    store.dispatch(AppAction::SetRepoError(Some(e.to_string())));
+                    ctx.request_repaint();
+                }
                 return;
             }
 
@@ -420,21 +424,23 @@ impl PalimpsestApp {
                 }
             };
 
-            store.dispatch(AppAction::RefreshGitData {
-                commits,
-                branches,
-                remotes,
-                tags,
-                status,
-            });
+            if store.get_state().current_repo.as_ref() == Some(&current_repo_path) {
+                store.dispatch(AppAction::RefreshGitData {
+                    commits,
+                    branches,
+                    remotes,
+                    tags,
+                    status,
+                });
 
-            if errors.is_empty() {
-                store.dispatch(AppAction::SetRepoError(None));
-            } else {
-                store.dispatch(AppAction::SetRepoError(Some(errors.join("; "))));
+                if errors.is_empty() {
+                    store.dispatch(AppAction::SetRepoError(None));
+                } else {
+                    store.dispatch(AppAction::SetRepoError(Some(errors.join("; "))));
+                }
+
+                ctx.request_repaint();
             }
-
-            ctx.request_repaint();
         });
     }
 
@@ -458,10 +464,9 @@ impl PalimpsestApp {
                     .map_or(0, |s| s.staged_count + s.unstaged_count);
 
                 let commits = repo.commits(Some(20)).unwrap_or_default();
-                let all_commits = repo.commits(None).unwrap_or_default();
-                let total_commits = all_commits.len();
+                let (total_commits, oldest_commit) = repo.history_stats().unwrap_or((0, None));
 
-                let initial_date = all_commits.last().map_or("unknown".to_string(), |c| {
+                let initial_date = oldest_commit.map_or("unknown".to_string(), |c| {
                     format_relative_time(
                         c.timestamp
                             .duration_since(std::time::UNIX_EPOCH)
@@ -469,7 +474,7 @@ impl PalimpsestApp {
                             .unwrap_or(0),
                     )
                 });
-                let last_date = all_commits.first().map_or("unknown".to_string(), |c| {
+                let last_date = commits.first().map_or("unknown".to_string(), |c| {
                     format_relative_time(
                         c.timestamp
                             .duration_since(std::time::UNIX_EPOCH)

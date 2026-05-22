@@ -46,18 +46,43 @@ impl GitRepo {
 
         let mut commits = Vec::new();
         for oid_result in revwalk {
-            let oid = oid_result?;
-            let commit = self.repo.find_commit(oid)?;
-            commits.push(self.commit_from_git2(&commit));
             if let Some(l) = limit {
                 if commits.len() >= l {
                     break;
                 }
             }
+            let oid = oid_result?;
+            let commit = self.repo.find_commit(oid)?;
+            commits.push(self.commit_from_git2(&commit));
         }
 
         tracing::info!(count = commits.len(), "Commits fetched");
         Ok(commits)
+    }
+
+    pub fn history_stats(&self) -> Result<(usize, Option<Commit>), GitError> {
+        let mut revwalk = self.repo.revwalk()?;
+        revwalk.set_sorting(Sort::TOPOLOGICAL)?;
+        if revwalk.push_head().is_err() {
+            return Ok((0, None));
+        }
+
+        let mut count = 0;
+        let mut last_oid = None;
+        for oid_result in revwalk {
+            let oid = oid_result?;
+            last_oid = Some(oid);
+            count += 1;
+        }
+
+        let oldest_commit = if let Some(oid) = last_oid {
+            let commit = self.repo.find_commit(oid)?;
+            Some(self.commit_from_git2(&commit))
+        } else {
+            None
+        };
+
+        Ok((count, oldest_commit))
     }
 
     pub fn branches(&self) -> Result<Vec<Branch>, GitError> {
@@ -634,9 +659,11 @@ impl GitRepo {
             Some(r) => r,
             None => {
                 let remotes = self.repo.remotes()?;
-                match remotes.get(0)? {
-                    Some(name) => name.to_string(),
-                    None => return Err(GitError::Git("No remotes configured".to_string())),
+                match remotes.get(0) {
+                    Ok(Some(name)) => name.to_string(),
+                    Ok(None) | Err(_) => {
+                        return Err(GitError::Git("No remotes configured".to_string()));
+                    }
                 }
             }
         };
@@ -740,5 +767,66 @@ fn secs_to_system_time(secs: i64) -> SystemTime {
         SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
     } else {
         SystemTime::UNIX_EPOCH
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_commits_limit_zero_and_history_stats() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "palimpsest_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let repo = git2::Repository::init(&temp_dir).unwrap();
+        let git_repo = GitRepo::open(temp_dir.to_str().unwrap()).unwrap();
+
+        // With no commits, history stats should be zero
+        let (count, oldest) = git_repo.history_stats().unwrap();
+        assert_eq!(count, 0);
+        assert!(oldest.is_none());
+
+        // commits() on an empty repo will return an Err because HEAD points to a non-existent ref
+        assert!(git_repo.commits(Some(0)).is_err());
+        assert!(git_repo.commits(None).is_err());
+
+        // Create a commit
+        let signature = git2::Signature::now("Test User", "test@example.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+
+        let oid = repo
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "Initial commit",
+                &tree,
+                &[],
+            )
+            .unwrap();
+
+        // Test commits(Some(0)) returns 0 commits
+        let commits = git_repo.commits(Some(0)).unwrap();
+        assert_eq!(commits.len(), 0);
+
+        // Test commits(Some(1)) returns 1 commit
+        let commits_one = git_repo.commits(Some(1)).unwrap();
+        assert_eq!(commits_one.len(), 1);
+        assert_eq!(commits_one[0].hash, oid.to_string());
+
+        // Test history_stats returns (1, Some(commit))
+        let (count, oldest) = git_repo.history_stats().unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(oldest.unwrap().hash, oid.to_string());
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
     }
 }
