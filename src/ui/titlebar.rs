@@ -288,10 +288,18 @@ pub fn show(
                     ui.close();
                 }
 
-                let user_button_response = ui.add(
-                    egui::Button::new(egui::RichText::new(USER_CIRCLE).size(14.0))
-                        .min_size(egui::vec2(18.0, 18.0)),
-                );
+                let user_button_response = if let Some(user) = github_user {
+                    let avatar = egui::Image::new(&user.avatar_url)
+                        .fit_to_exact_size(egui::vec2(18.0, 18.0))
+                        .corner_radius(egui::CornerRadius::same(9))
+                        .sense(egui::Sense::click());
+                    ui.add(avatar)
+                } else {
+                    ui.add(
+                        egui::Button::new(egui::RichText::new(USER_CIRCLE).size(14.0))
+                            .min_size(egui::vec2(18.0, 18.0)),
+                    )
+                };
                 if user_button_response.clicked() {
                     profile_panel_state.open = !profile_panel_state.open;
                 }

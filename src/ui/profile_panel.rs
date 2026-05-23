@@ -53,27 +53,10 @@ pub fn show(
             // 1. Header Section (GitHub avatar placeholder & username)
             ui.vertical_centered(|ui| {
                 if let Some(user) = github_user {
-                    // Initial Circle Avatar
-                    let first_char = user
-                        .name
-                        .as_ref()
-                        .and_then(|n| n.chars().next())
-                        .unwrap_or_else(|| user.login.chars().next().unwrap_or('?'))
-                        .to_uppercase()
-                        .to_string();
-
-                    let (avatar_rect, _) =
-                        ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
-                    let center = avatar_rect.center();
-                    ui.painter()
-                        .circle_filled(center, 24.0, egui::Color32::from_rgb(28, 145, 220));
-                    ui.painter().text(
-                        center,
-                        egui::Align2::CENTER_CENTER,
-                        first_char,
-                        egui::FontId::new(20.0, egui::FontFamily::Proportional),
-                        egui::Color32::WHITE,
-                    );
+                    let avatar = egui::Image::new(&user.avatar_url)
+                        .fit_to_exact_size(egui::vec2(48.0, 48.0))
+                        .corner_radius(egui::CornerRadius::same(24));
+                    ui.add(avatar);
 
                     ui.add_space(4.0);
 
