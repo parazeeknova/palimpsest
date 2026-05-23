@@ -1,10 +1,13 @@
-.PHONY: check check-types fmt install-hooks bump-version update release-tag
+.PHONY: check check-types fmt install-hooks bump-version update release-tag clean-local
 
 dev:
 	cargo run
 
 run-release:
 	cargo run --release
+
+clean-local:
+	rm -rf ~/.local/share/palimpsest
 
 check:
 	./scripts/check.sh
