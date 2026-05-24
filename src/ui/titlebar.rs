@@ -40,7 +40,6 @@ pub fn show(
     github_user: Option<&crate::state::GitHubUserProfile>,
     git_identity: Option<&crate::state::CachedGitIdentity>,
     auth_status: &crate::state::AuthStatus,
-    current_repo_owned_by_authed_user: Option<bool>,
 ) -> (OpenAction, profile_panel::ProfileAction) {
     let mut action = OpenAction::None;
     let mut profile_action = profile_panel::ProfileAction::None;
@@ -263,15 +262,6 @@ pub fn show(
                     );
                 },
             );
-
-            if let Some(owned) = current_repo_owned_by_authed_user {
-                ui.add_space(10.0);
-                ui.label(
-                    egui::RichText::new(crate::ui::repo_manager::ownership_badge_text(Some(owned)))
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(165, 165, 165)),
-                );
-            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if *show_window_buttons {

@@ -1144,7 +1144,6 @@ impl eframe::App for PalimpsestApp {
             state.github_user.as_ref(),
             state.git_identity.as_ref(),
             &state.auth_status,
-            self.current_repo_owned_by_authed_user,
         );
 
         if show_window_buttons != self.store.get_state().show_window_buttons {
@@ -1207,7 +1206,13 @@ impl eframe::App for PalimpsestApp {
         let state = self.store.get_state();
         let repo_name = self.repo_name();
         let current_branch = state.cached_status.as_ref().map(|s| s.branch.as_str());
-        let toolbar_action = toolbar::show(ui, repo_name.as_deref(), current_branch);
+        let toolbar_action = toolbar::show(
+            ui,
+            repo_name.as_deref(),
+            current_branch,
+            &state,
+            self.current_repo_owned_by_authed_user,
+        );
         let ctx = ui.ctx().clone();
 
         match toolbar_action {

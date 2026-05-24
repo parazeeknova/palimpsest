@@ -1,7 +1,9 @@
+use crate::state::AppState;
 use eframe::egui;
 use egui_phosphor::regular::{
     ARROW_CLOCKWISE, ARROW_COUNTER_CLOCKWISE, ARROWS_CLOCKWISE, BROWSERS, CARET_DOWN, FOLDER,
-    GIT_BRANCH, GIT_FORK, GIT_PULL_REQUEST, SIDEBAR, STACK, TERMINAL_WINDOW, TEXT_ALIGN_LEFT,
+    GIT_BRANCH, GIT_COMMIT, GIT_FORK, GIT_PULL_REQUEST, GLOBE_SIMPLE, SIDEBAR, STACK, TAG,
+    TERMINAL_WINDOW, TEXT_ALIGN_LEFT, USER_CIRCLE,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +31,8 @@ pub fn show(
     ui: &mut egui::Ui,
     repo_name: Option<&str>,
     current_branch: Option<&str>,
+    state: &AppState,
+    current_repo_owned_by_authed_user: Option<bool>,
 ) -> ToolbarAction {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, TOOLBAR_HEIGHT), egui::Sense::hover());
@@ -66,7 +70,15 @@ pub fn show(
         center_rect.shrink2(egui::vec2(8.0, 2.0)),
         "toolbar_center",
         egui::Layout::left_to_right(egui::Align::Center),
-        |ui| center_panel(ui, repo_name, current_branch),
+        |ui| {
+            center_panel(
+                ui,
+                repo_name,
+                current_branch,
+                state,
+                current_repo_owned_by_authed_user,
+            )
+        },
     );
     child_ui(
         ui,
@@ -142,7 +154,13 @@ fn left_panel(ui: &mut egui::Ui, action: &mut ToolbarAction) {
     });
 }
 
-fn center_panel(ui: &mut egui::Ui, repo_name: Option<&str>, current_branch: Option<&str>) {
+fn center_panel(
+    ui: &mut egui::Ui,
+    repo_name: Option<&str>,
+    current_branch: Option<&str>,
+    state: &AppState,
+    current_repo_owned_by_authed_user: Option<bool>,
+) {
     let rect = ui.max_rect();
     let group_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, ACTION_HEIGHT));
     let text_rect = egui::Rect::from_min_size(
@@ -154,13 +172,228 @@ fn center_panel(ui: &mut egui::Ui, repo_name: Option<&str>, current_branch: Opti
         egui::pos2(rect.left(), rect.bottom() - 20.0),
         egui::vec2(16.0, 16.0),
     );
-    ui.painter().text(
-        menu_icon_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        TEXT_ALIGN_LEFT,
-        egui::FontId::proportional(14.0),
-        ui.visuals().text_color(),
-    );
+
+    if repo_name.is_some() {
+        let response = ui
+            .put(
+                menu_icon_rect,
+                egui::Button::new(egui::RichText::new(TEXT_ALIGN_LEFT).size(14.0))
+                    .frame(false)
+                    .min_size(egui::vec2(16.0, 16.0)),
+            )
+            .on_hover_text("Repository Details");
+
+        egui::Popup::menu(&response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(320.0);
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
+
+                // Header with title and ownership indicator in top-right corner
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Repository Details")
+                            .strong()
+                            .size(13.0),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(owned) = current_repo_owned_by_authed_user {
+                            let icon = if owned { USER_CIRCLE } else { GLOBE_SIMPLE };
+                            let description =
+                                crate::ui::repo_manager::ownership_badge_text(Some(owned));
+                            ui.label(
+                                egui::RichText::new(icon)
+                                    .size(13.0)
+                                    .color(egui::Color32::from_rgb(165, 165, 165)),
+                            )
+                            .on_hover_text(description);
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                // 1. Path
+                if let Some(path) = &state.current_repo {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(FOLDER)
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140)),
+                        );
+                        ui.label("Path:");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(path)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(140, 140, 140)),
+                            )
+                            .on_hover_text(path);
+                        });
+                    });
+                }
+
+                // 2. Active Branch
+                let branch_name = current_branch.unwrap_or("no branch");
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(GIT_BRANCH)
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                    );
+                    ui.label("Branch:");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(branch_name)
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140)),
+                        );
+                    });
+                });
+
+                // 3. Status
+                if let Some(status) = &state.cached_status {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(STACK)
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140)),
+                        );
+                        ui.label("Status:");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let status_text = if status.files_changed > 0 {
+                                format!(
+                                    "{} files changed (+{}, -{})",
+                                    status.files_changed, status.additions, status.deletions
+                                )
+                            } else {
+                                "Clean".to_string()
+                            };
+                            let color = if status.files_changed > 0 {
+                                egui::Color32::from_rgb(220, 180, 80) // gold for changes
+                            } else {
+                                egui::Color32::from_rgb(80, 200, 120) // green for clean
+                            };
+                            ui.label(egui::RichText::new(status_text).size(11.0).color(color));
+                        });
+                    });
+                }
+
+                // 4. Statistics
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(GIT_COMMIT)
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                    );
+                    ui.label("Commits:");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{} commits", state.cached_commits.len()))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140)),
+                        );
+                    });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(GIT_FORK)
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                    );
+                    ui.label("Branches:");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} branches",
+                                state.cached_branches.len()
+                            ))
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                        );
+                    });
+                });
+
+                if !state.cached_tags.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(TAG)
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140)),
+                        );
+                        ui.label("Tags:");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{} tags", state.cached_tags.len()))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(140, 140, 140)),
+                            );
+                        });
+                    });
+                }
+
+                if !state.cached_stashes.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(STACK)
+                                .size(12.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140)),
+                        );
+                        ui.label("Stashes:");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} stashes",
+                                    state.cached_stashes.len()
+                                ))
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(140, 140, 140)),
+                            );
+                        });
+                    });
+                }
+
+                // 5. Remotes
+                if !state.cached_remotes.is_empty() {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("Remotes")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                    );
+                    for remote in &state.cached_remotes {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(GLOBE_SIMPLE)
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(140, 140, 140)),
+                            );
+                            ui.label(egui::RichText::new(&remote.name).size(11.0));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(&remote.url)
+                                            .size(10.0)
+                                            .color(egui::Color32::from_rgb(140, 140, 140)),
+                                    )
+                                    .on_hover_text(&remote.url);
+                                },
+                            );
+                        });
+                    }
+                }
+            });
+    } else {
+        ui.painter().text(
+            menu_icon_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            TEXT_ALIGN_LEFT,
+            egui::FontId::proportional(14.0),
+            ui.visuals().text_color(),
+        );
+    }
 
     child_ui(
         ui,
