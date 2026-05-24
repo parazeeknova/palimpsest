@@ -1,7 +1,7 @@
 use eframe::egui;
 use egui_phosphor::regular::{
-    ARROW_LEFT, ARROW_RIGHT, CHECK_CIRCLE, ENVELOPE, GITHUB_LOGO, KEY, LOCK, SHIELD_CHECK, USER,
-    WARNING_CIRCLE,
+    ARROW_LEFT, ARROW_RIGHT, ARROW_SQUARE_OUT, CHECK_CIRCLE, COPY, ENVELOPE, GITHUB_LOGO, KEY,
+    LOCK, SHIELD_CHECK, USER, WARNING_CIRCLE,
 };
 
 use crate::auth::git_identity::{GhCliStatus, GitIdentity, GpgKeyInfo, SshKeyInfo};
@@ -24,7 +24,7 @@ pub struct SetupWizardState {
     pub detection_started: bool,
 }
 
-#[derive(Default, PartialEq, Clone)]
+#[derive(Default, PartialEq, Clone, Debug)]
 pub enum WizardStep {
     #[default]
     GitIdentity,
@@ -59,26 +59,49 @@ pub fn show(ui: &mut egui::Ui, state: &mut SetupWizardState) -> WizardAction {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
 
-            match state.step.clone() {
-                WizardStep::GitIdentity => {
-                    action = render_git_identity_step(ui, state);
-                }
-                WizardStep::SshGpgKeys => {
-                    action = render_ssh_gpg_step(ui, state);
-                }
-                WizardStep::GitHubAuth => {
-                    action = render_github_auth_step(ui, state);
-                }
-                WizardStep::Done => {
-                    action = render_done_step(ui, state);
-                }
-            }
+            ui.horizontal(|ui| {
+                // Left Column: Logo (shown for every step)
+                ui.allocate_ui(egui::vec2(140.0, ui.available_height()), |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(24.0);
+                        let logo = egui::Image::new(egui::include_image!("../assets/logo.svg"))
+                            .fit_to_exact_size(egui::vec2(128.0, 128.0))
+                            .tint(egui::Color32::from_white_alpha(120));
+                        ui.add(logo);
+                    });
+                });
 
-            ui.add_space(8.0);
-            let nav_action = render_step_indicator(ui, state);
-            if action == WizardAction::None {
-                action = nav_action;
-            }
+                ui.add_space(16.0);
+
+                // Right Column: Active Step Content + Navigation
+                ui.allocate_ui(
+                    egui::vec2(ui.available_width(), ui.available_height()),
+                    |ui| {
+                        ui.vertical(|ui| {
+                            match state.step.clone() {
+                                WizardStep::GitIdentity => {
+                                    action = render_git_identity_step(ui, state);
+                                }
+                                WizardStep::SshGpgKeys => {
+                                    action = render_ssh_gpg_step(ui, state);
+                                }
+                                WizardStep::GitHubAuth => {
+                                    action = render_github_auth_step(ui, state);
+                                }
+                                WizardStep::Done => {
+                                    action = render_done_step(ui, state);
+                                }
+                            }
+
+                            ui.add_space(8.0);
+                            let nav_action = render_step_indicator(ui, state);
+                            if action == WizardAction::None {
+                                action = nav_action;
+                            }
+                        });
+                    },
+                );
+            });
         });
 
     action
@@ -200,8 +223,9 @@ fn render_step_indicator(ui: &mut egui::Ui, state: &mut SetupWizardState) -> Wiz
     let dash_height = 4.0_f32;
     let spacing = 6.0_f32;
 
-    let has_back = active_index > 0 && active_index < 3;
+    let has_back = active_index > 0 && active_index <= 3;
     let has_next = active_index < 3;
+    let has_finish_step = active_index == 3;
     let has_skip = active_index == 2 && state.github_user.is_none();
 
     let row_width = ui.available_width();
@@ -209,6 +233,7 @@ fn render_step_indicator(ui: &mut egui::Ui, state: &mut SetupWizardState) -> Wiz
     let back_width = 76.0_f32;
     let next_width = 76.0_f32;
     let skip_width = 60.0_f32;
+    let finish_width = 76.0_f32;
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
@@ -220,9 +245,11 @@ fn render_step_indicator(ui: &mut egui::Ui, state: &mut SetupWizardState) -> Wiz
                     .clicked();
 
             if clicked {
+                tracing::info!("Setup wizard: clicked Back (from_step: {:?})", state.step);
                 match state.step {
                     WizardStep::SshGpgKeys => state.step = WizardStep::GitIdentity,
                     WizardStep::GitHubAuth => state.step = WizardStep::SshGpgKeys,
+                    WizardStep::Done => state.step = WizardStep::GitHubAuth,
                     _ => {}
                 }
             }
@@ -256,7 +283,11 @@ fn render_step_indicator(ui: &mut egui::Ui, state: &mut SetupWizardState) -> Wiz
                         let color = if step_index == active_index {
                             egui::Color32::from_rgb(200, 200, 200)
                         } else if step_index < active_index {
-                            egui::Color32::from_rgb(80, 180, 80)
+                            if step_index == 2 && state.github_user.is_none() {
+                                egui::Color32::from_rgb(220, 80, 80) // Red for skipped/not signed in
+                            } else {
+                                egui::Color32::from_rgb(80, 180, 80) // Green for completed
+                            }
                         } else {
                             egui::Color32::from_rgb(60, 60, 60)
                         };
@@ -267,9 +298,11 @@ fn render_step_indicator(ui: &mut egui::Ui, state: &mut SetupWizardState) -> Wiz
                 });
             });
 
-        // 4. Right spacer: push Next/Skip buttons to the far right!
+        // 4. Right spacer: push Next/Skip/Finish buttons to the far right!
         let right_buttons_width = if has_skip {
             skip_width + next_width + 8.0
+        } else if has_finish_step {
+            finish_width
         } else {
             next_width
         };
@@ -278,11 +311,12 @@ fn render_step_indicator(ui: &mut egui::Ui, state: &mut SetupWizardState) -> Wiz
             ui.add_space(right_spacer);
         }
 
-        // 5. Right side: Skip and Next buttons
+        // 5. Right side: Skip, Next and Finish buttons
         if has_skip {
             let clicked = render_pill_button(ui, "Skip", false, skip_width).clicked();
 
             if clicked {
+                tracing::info!("Setup wizard: skipped GitHub authentication");
                 action = WizardAction::Skip;
             }
         }
@@ -303,6 +337,7 @@ fn render_step_indicator(ui: &mut egui::Ui, state: &mut SetupWizardState) -> Wiz
             .clicked();
 
             if clicked {
+                tracing::info!("Setup wizard: clicked Next (from_step: {:?})", state.step);
                 match state.step {
                     WizardStep::GitIdentity => state.step = WizardStep::SshGpgKeys,
                     WizardStep::SshGpgKeys => state.step = WizardStep::GitHubAuth,
@@ -311,6 +346,20 @@ fn render_step_indicator(ui: &mut egui::Ui, state: &mut SetupWizardState) -> Wiz
                     }
                     _ => {}
                 }
+            }
+        }
+
+        if has_finish_step {
+            let clicked =
+                render_pill_button(ui, &format!("Finish {}", ARROW_RIGHT), true, finish_width)
+                    .clicked();
+
+            if clicked {
+                tracing::info!("Setup wizard: setup completed via Finish");
+                action = WizardAction::Complete {
+                    git_name: state.git_name.clone(),
+                    git_email: state.git_email.clone(),
+                };
             }
         }
     });
@@ -325,111 +374,88 @@ fn render_git_identity_step(ui: &mut egui::Ui, state: &mut SetupWizardState) -> 
         action = WizardAction::StartDetection;
     }
 
-    ui.horizontal(|ui| {
-        // Left Column: Logo
-        ui.allocate_ui(egui::vec2(140.0, ui.available_height()), |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(24.0);
-                let logo = egui::Image::new(egui::include_image!("../assets/logo.svg"))
-                    .fit_to_exact_size(egui::vec2(128.0, 128.0))
-                    .tint(egui::Color32::from_white_alpha(120));
-                ui.add(logo);
-            });
-        });
+    ui.vertical(|ui| {
+        ui.add_space(12.0);
+        ui.label(
+            egui::RichText::new("👋 Welcome to Palimpsest")
+                .size(20.0)
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new("Let's set up your Git identity")
+                .size(13.0)
+                .color(egui::Color32::from_rgb(165, 165, 165)),
+        );
 
         ui.add_space(16.0);
 
-        // Right Column: Welcome and Form
-        ui.allocate_ui(
-            egui::vec2(ui.available_width(), ui.available_height()),
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.add_space(12.0);
+        ui.scope(|ui| {
+            let visuals = ui.visuals_mut();
+            visuals.extreme_bg_color = egui::Color32::from_rgb(38, 38, 38);
+            visuals.widgets.inactive.bg_stroke =
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(60, 60, 60));
+            visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+            visuals.widgets.active.bg_stroke =
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(28, 145, 220));
+            visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
+            visuals.widgets.hovered.bg_stroke =
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(80, 80, 80));
+            visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(USER).size(14.0));
+                ui.label(egui::RichText::new("Name").size(12.0));
+            });
+            ui.add_sized(
+                [ui.available_width(), 26.0],
+                egui::TextEdit::singleline(&mut state.git_name)
+                    .hint_text("Your name (e.g. Jane Doe)")
+                    .margin(egui::Margin::symmetric(8, 6)),
+            );
+
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(ENVELOPE).size(14.0));
+                ui.label(egui::RichText::new("Email").size(12.0));
+            });
+            ui.add_sized(
+                [ui.available_width(), 26.0],
+                egui::TextEdit::singleline(&mut state.git_email)
+                    .hint_text("your@email.com")
+                    .margin(egui::Margin::symmetric(8, 6)),
+            );
+        });
+
+        ui.add_space(10.0);
+
+        if let Some(ref cli_status) = state.gh_cli_status {
+            ui.horizontal(|ui| {
+                if cli_status.logged_in {
                     ui.label(
-                        egui::RichText::new("👋 Welcome to Palimpsest")
-                            .size(20.0)
-                            .strong(),
+                        egui::RichText::new(CHECK_CIRCLE)
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(80, 180, 80)),
                     );
+                    let status_text = match &cli_status.username {
+                        Some(username) => {
+                            format!("gh CLI authenticated as {}", username)
+                        }
+                        None => "gh CLI authenticated".to_string(),
+                    };
+                    ui.label(egui::RichText::new(status_text).size(12.0));
+                } else {
                     ui.label(
-                        egui::RichText::new("Let's set up your Git identity")
-                            .size(13.0)
-                            .color(egui::Color32::from_rgb(165, 165, 165)),
+                        egui::RichText::new(WARNING_CIRCLE)
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(200, 80, 80)),
                     );
+                    ui.label(egui::RichText::new("gh CLI not authenticated").size(12.0));
+                }
+            });
+        }
 
-                    ui.add_space(16.0);
-
-                    ui.scope(|ui| {
-                        let visuals = ui.visuals_mut();
-                        visuals.extreme_bg_color = egui::Color32::from_rgb(38, 38, 38);
-                        visuals.widgets.inactive.bg_stroke =
-                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(60, 60, 60));
-                        visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
-                        visuals.widgets.active.bg_stroke =
-                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(28, 145, 220));
-                        visuals.widgets.active.corner_radius = egui::CornerRadius::same(6);
-                        visuals.widgets.hovered.bg_stroke =
-                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(80, 80, 80));
-                        visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
-
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(USER).size(14.0));
-                            ui.label(egui::RichText::new("Name").size(12.0));
-                        });
-                        ui.add_sized(
-                            [ui.available_width(), 26.0],
-                            egui::TextEdit::singleline(&mut state.git_name)
-                                .hint_text("Your name (e.g. Jane Doe)")
-                                .margin(egui::Margin::symmetric(8, 6)),
-                        );
-
-                        ui.add_space(8.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(ENVELOPE).size(14.0));
-                            ui.label(egui::RichText::new("Email").size(12.0));
-                        });
-                        ui.add_sized(
-                            [ui.available_width(), 26.0],
-                            egui::TextEdit::singleline(&mut state.git_email)
-                                .hint_text("your@email.com")
-                                .margin(egui::Margin::symmetric(8, 6)),
-                        );
-                    });
-
-                    ui.add_space(10.0);
-
-                    if let Some(ref cli_status) = state.gh_cli_status {
-                        ui.horizontal(|ui| {
-                            if cli_status.logged_in {
-                                ui.label(
-                                    egui::RichText::new(CHECK_CIRCLE)
-                                        .size(14.0)
-                                        .color(egui::Color32::from_rgb(80, 180, 80)),
-                                );
-                                let status_text = match &cli_status.username {
-                                    Some(username) => {
-                                        format!("gh CLI authenticated as {}", username)
-                                    }
-                                    None => "gh CLI authenticated".to_string(),
-                                };
-                                ui.label(egui::RichText::new(status_text).size(12.0));
-                            } else {
-                                ui.label(
-                                    egui::RichText::new(WARNING_CIRCLE)
-                                        .size(14.0)
-                                        .color(egui::Color32::from_rgb(200, 80, 80)),
-                                );
-                                ui.label(
-                                    egui::RichText::new("gh CLI not authenticated").size(12.0),
-                                );
-                            }
-                        });
-                    }
-
-                    ui.add_space(12.0);
-                });
-            },
-        );
+        ui.add_space(12.0);
     });
 
     action
@@ -522,99 +548,183 @@ fn render_github_auth_step(ui: &mut egui::Ui, state: &mut SetupWizardState) -> W
 
     ui.add_space(12.0);
 
-    if let Some(ref github_user) = state.github_user {
-        // Successfully connected
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(CHECK_CIRCLE)
-                    .size(16.0)
-                    .color(egui::Color32::from_rgb(80, 180, 80)),
-            );
-            ui.label(
-                egui::RichText::new(format!("Connected as {}", github_user.login))
-                    .size(14.0)
-                    .color(egui::Color32::from_rgb(80, 180, 80)),
-            );
-        });
-    } else if let Some(ref error_message) = state.auth_error {
-        // Error state
-        ui.label(
-            egui::RichText::new(format!("{} {}", WARNING_CIRCLE, error_message))
-                .size(12.0)
-                .color(egui::Color32::from_rgb(220, 80, 80)),
-        );
-        ui.add_space(8.0);
-        if ui
-            .button(egui::RichText::new(format!("{} Try Again", GITHUB_LOGO)).size(12.0))
-            .clicked()
-        {
-            state.auth_error = None;
-            action = WizardAction::StartDeviceFlow;
-        }
-    } else if let Some(ref device_flow_state) = state.device_code_response.clone() {
-        // Device flow active — show code and verification URL
-        ui.label(
-            egui::RichText::new("Enter the code below at GitHub:")
-                .size(13.0)
-                .color(egui::Color32::from_rgb(165, 165, 165)),
-        );
-
-        ui.add_space(12.0);
-
-        ui.vertical_centered(|ui| {
-            ui.label(
-                egui::RichText::new(&device_flow_state.user_code)
-                    .size(28.0)
-                    .strong()
-                    .monospace(),
-            );
-        });
-
-        ui.add_space(8.0);
-
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Open:").size(12.0));
-            if ui
-                .link(egui::RichText::new(&device_flow_state.verification_uri).size(12.0))
-                .clicked()
-            {
-                action =
-                    WizardAction::OpenVerificationUrl(device_flow_state.verification_uri.clone());
-            }
-        });
-
-        if state.auth_polling {
-            ui.add_space(8.0);
+    // 1. Connection Status / Actions (rendered vertically)
+    ui.vertical(|ui| {
+        if let Some(ref github_user) = state.github_user {
+            // Successfully connected
             ui.horizontal(|ui| {
-                ui.spinner();
                 ui.label(
-                    egui::RichText::new("Waiting for authorization...")
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(165, 165, 165)),
+                    egui::RichText::new(CHECK_CIRCLE)
+                        .size(16.0)
+                        .color(egui::Color32::from_rgb(80, 180, 80)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("Connected as {}", github_user.login))
+                        .size(14.0)
+                        .color(egui::Color32::from_rgb(80, 180, 80)),
                 );
             });
-        }
-    } else {
-        // Initial state — prompt to connect
-        ui.label(
-            egui::RichText::new("Connect your GitHub account for remote features")
-                .size(13.0)
-                .color(egui::Color32::from_rgb(165, 165, 165)),
-        );
+        } else if let Some(ref error_message) = state.auth_error {
+            // Error state
+            ui.label(
+                egui::RichText::new(format!("{} {}", WARNING_CIRCLE, error_message))
+                    .size(12.0)
+                    .color(egui::Color32::from_rgb(220, 80, 80)),
+            );
+            ui.add_space(8.0);
 
-        ui.add_space(16.0);
+            let clicked =
+                render_pill_button(ui, &format!("{} Try Again", GITHUB_LOGO), true, 120.0_f32)
+                    .clicked();
 
-        ui.vertical_centered(|ui| {
-            if ui
-                .button(
-                    egui::RichText::new(format!("{}  Connect to GitHub", GITHUB_LOGO)).size(13.0),
-                )
-                .clicked()
-            {
+            if clicked {
+                tracing::info!("Setup wizard: retrying GitHub authorization");
+                state.auth_error = None;
                 action = WizardAction::StartDeviceFlow;
             }
+        } else if let Some(ref device_flow_state) = state.device_code_response.clone() {
+            // Device flow active — show code and verification URL
+            ui.label(
+                egui::RichText::new("Enter the code below at GitHub:")
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(165, 165, 165)),
+            );
+
+            ui.add_space(12.0);
+
+            // Code layout: show code and a copy button
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(&device_flow_state.user_code)
+                        .size(28.0)
+                        .strong()
+                        .monospace(),
+                );
+                ui.add_space(8.0);
+
+                let copy_clicked = render_pill_button(ui, COPY, false, 30.0_f32).clicked();
+
+                if copy_clicked {
+                    tracing::info!("Setup wizard: copied device verification code to clipboard");
+                    ui.ctx().copy_text(device_flow_state.user_code.clone());
+                }
+            });
+
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Open:").size(12.0));
+                let link_clicked = ui
+                    .link(egui::RichText::new(&device_flow_state.verification_uri).size(12.0))
+                    .clicked();
+
+                ui.add_space(4.0);
+                let icon_clicked =
+                    render_pill_button(ui, ARROW_SQUARE_OUT, false, 30.0_f32).clicked();
+
+                if link_clicked || icon_clicked {
+                    tracing::info!("Setup wizard: opening GitHub verification URL");
+                    action = WizardAction::OpenVerificationUrl(
+                        device_flow_state.verification_uri.clone(),
+                    );
+                }
+            });
+
+            if state.auth_polling {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        egui::RichText::new("Waiting for authorization...")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(165, 165, 165)),
+                    );
+                });
+            }
+        } else {
+            // Initial state — prompt to connect
+            ui.label(
+                egui::RichText::new("Connect your GitHub account for remote features")
+                    .size(13.0)
+                    .color(egui::Color32::from_rgb(165, 165, 165)),
+            );
+
+            ui.add_space(16.0);
+
+            let clicked = render_pill_button(
+                ui,
+                &format!("{}  Connect to GitHub", GITHUB_LOGO),
+                true,
+                170.0_f32,
+            )
+            .clicked();
+
+            if clicked {
+                tracing::info!(
+                    "Setup wizard: clicked Connect to GitHub to start authorization flow"
+                );
+                action = WizardAction::StartDeviceFlow;
+            }
+        }
+    });
+
+    ui.add_space(20.0);
+
+    // 2. Awesome Facts Card (rendered below status/actions)
+    egui::Frame::NONE
+        .fill(egui::Color32::from_rgb(32, 32, 32))
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(50, 50, 50)))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("💡 Did you know?").strong().size(13.0));
+                ui.add_space(8.0);
+
+                // Fact 1
+                ui.horizontal_top(|ui| {
+                    ui.label(egui::RichText::new("•").color(egui::Color32::from_rgb(28, 145, 220)).strong());
+                    ui.label(
+                        egui::RichText::new("Palimpsest parses commit histories at lightning speeds by leveraging Rust's zero-cost abstractions.")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(180, 180, 180)),
+                    );
+                });
+                ui.add_space(6.0);
+
+                // Fact 2
+                ui.horizontal_top(|ui| {
+                    ui.label(egui::RichText::new("•").color(egui::Color32::from_rgb(28, 145, 220)).strong());
+                    ui.label(
+                        egui::RichText::new("GitHub integration enables viewing pull requests, remote branches, and online commit statuses seamlessly.")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(180, 180, 180)),
+                    );
+                });
+                ui.add_space(6.0);
+
+                // Fact 3
+                ui.horizontal_top(|ui| {
+                    ui.label(egui::RichText::new("•").color(egui::Color32::from_rgb(28, 145, 220)).strong());
+                    ui.label(
+                        egui::RichText::new("Your credentials are never stored in plain text. They are saved directly to your OS secure keyring.")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(180, 180, 180)),
+                    );
+                });
+                ui.add_space(6.0);
+
+                // Fact 4
+                ui.horizontal_top(|ui| {
+                    ui.label(egui::RichText::new("•").color(egui::Color32::from_rgb(28, 145, 220)).strong());
+                    ui.label(
+                        egui::RichText::new("The name 'Palimpsest' comes from ancient manuscripts reused over time, much like git branch revisions.")
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(180, 180, 180)),
+                    );
+                });
+            });
         });
-    }
 
     ui.add_space(16.0);
 
@@ -622,10 +732,10 @@ fn render_github_auth_step(ui: &mut egui::Ui, state: &mut SetupWizardState) -> W
 }
 
 fn render_done_step(ui: &mut egui::Ui, state: &mut SetupWizardState) -> WizardAction {
-    let mut action = WizardAction::None;
+    let action = WizardAction::None;
 
     ui.add_space(20.0);
-    ui.vertical_centered(|ui| {
+    ui.vertical(|ui| {
         ui.label(egui::RichText::new("✅ All Set!").size(22.0).strong());
     });
 
@@ -691,20 +801,61 @@ fn render_done_step(ui: &mut egui::Ui, state: &mut SetupWizardState) -> WizardAc
         ui.label(egui::RichText::new(format!("{}", state.gpg_keys.len())).size(12.0));
     });
 
-    ui.add_space(24.0);
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(12.0);
 
-    ui.vertical_centered(|ui| {
-        let clicked =
-            render_pill_button(ui, &format!("Get Started {}", ARROW_RIGHT), true, 120.0_f32)
-                .clicked();
+    ui.vertical(|ui| {
+        ui.label(egui::RichText::new("🚀 System Capabilities").strong().size(13.0));
+        ui.add_space(6.0);
 
-        if clicked {
-            action = WizardAction::Complete {
-                git_name: state.git_name.clone(),
-                git_email: state.git_email.clone(),
-            };
+        // Core visualizer status (always enabled)
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("✓").color(egui::Color32::from_rgb(80, 180, 80)).strong());
+            ui.label(egui::RichText::new("Local Git history visualizer (active)").size(12.0));
+        });
+
+        // GitHub Integration Status
+        if state.github_user.is_some() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("✓").color(egui::Color32::from_rgb(80, 180, 80)).strong());
+                ui.label(egui::RichText::new("GitHub remote services enabled").size(12.0));
+            });
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new("  • Pull request details, remote branches, and online status checks are fully integrated.")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(140, 140, 140)),
+            );
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("⚠").color(egui::Color32::from_rgb(220, 140, 40)).strong());
+                ui.label(egui::RichText::new("GitHub integration is skipped").size(12.0).color(egui::Color32::from_rgb(200, 150, 100)));
+            });
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new("  • You are missing: pull request metadata, remote branch history syncing, and remote actions.")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(150, 130, 120)),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                let clicked = render_pill_button(
+                    ui,
+                    &format!("{} Connect to GitHub", GITHUB_LOGO),
+                    true,
+                    150.0_f32,
+                ).clicked();
+                if clicked {
+                    tracing::info!("Setup wizard Done screen: redirecting to GitHub authorization screen");
+                    state.step = WizardStep::GitHubAuth;
+                }
+            });
         }
     });
+
+    ui.add_space(24.0);
 
     action
 }

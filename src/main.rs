@@ -1,10 +1,15 @@
 use eframe::egui;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use palimpsest::git::GitRepo;
+use palimpsest::git::live::{RepoLiveEvent, RepoLocalSnapshot, RepoOwnership, RepoRemoteSnapshot};
 use palimpsest::logger::LogBuffer;
 use palimpsest::state::{AppAction, AppStore, BranchAction, CommitAction, StashAction};
 use palimpsest::ui::command_palette::{PaletteResult, QuickLaunchAction};
+use palimpsest::ui::repo_manager::RepoOwnershipFilterLabel;
 use palimpsest::ui::repo_manager_sidebar;
 use palimpsest::ui::{
     body, command_palette, commit_panel, profile_panel, repo_manager_body, setup_wizard, sidebar,
@@ -65,6 +70,25 @@ struct PalimpsestApp {
     profile_panel_state: profile_panel::ProfilePanelState,
     setup_wizard_state: setup_wizard::SetupWizardState,
     last_fetched_repo: Option<String>,
+    repo_live_generation: u64,
+    repo_live_states: HashMap<String, RepoLiveState>,
+    repo_live_trackers: HashMap<String, RepoTrackerHandle>,
+    repo_live_tx: Sender<RepoLiveEvent>,
+    repo_live_rx: Receiver<RepoLiveEvent>,
+    egui_ctx: egui::Context,
+    authed_github_login: Option<String>,
+    current_repo_owned_by_authed_user: Option<bool>,
+    manager_repo_filter: repo_manager_sidebar::RepoOwnershipFilter,
+}
+
+struct RepoLiveState {
+    generation: u64,
+    local: Option<RepoLocalSnapshot>,
+    remote: Option<RepoRemoteSnapshot>,
+}
+
+struct RepoTrackerHandle {
+    stop: Arc<AtomicBool>,
 }
 
 impl PalimpsestApp {
@@ -75,7 +99,7 @@ impl PalimpsestApp {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
         let session = palimpsest::state::AppSession::load();
-        let store = palimpsest::state::create_store(session);
+        let store = palimpsest::state::create_store(session.clone());
 
         // Load credentials from secure storage and populate the store
         let creds = palimpsest::auth::credentials::load_credentials();
@@ -119,6 +143,8 @@ impl PalimpsestApp {
 
         tracing::info!("Application initialized");
 
+        let (repo_live_tx, repo_live_rx) = mpsc::channel();
+
         let mut app = Self {
             store,
             log_buffer,
@@ -138,6 +164,19 @@ impl PalimpsestApp {
             profile_panel_state: profile_panel::ProfilePanelState::default(),
             setup_wizard_state: setup_wizard::SetupWizardState::default(),
             last_fetched_repo: None,
+            repo_live_generation: 0,
+            repo_live_states: HashMap::new(),
+            repo_live_trackers: HashMap::new(),
+            repo_live_tx,
+            repo_live_rx,
+            egui_ctx: cc.egui_ctx.clone(),
+            authed_github_login: creds.github_user.clone().map(|u| u.login),
+            current_repo_owned_by_authed_user: None,
+            manager_repo_filter: match session.manager_repo_filter.as_str() {
+                "owned" => repo_manager_sidebar::RepoOwnershipFilter::Owned,
+                "external" => repo_manager_sidebar::RepoOwnershipFilter::External,
+                _ => repo_manager_sidebar::RepoOwnershipFilter::All,
+            },
         };
 
         app.restore_active_repo_from_state();
@@ -161,11 +200,195 @@ impl PalimpsestApp {
     }
 
     fn persist_session(&self) {
-        palimpsest::state::AppSession::from_state(&self.store.get_state()).save();
+        let mut session = palimpsest::state::AppSession::from_state(&self.store.get_state());
+        session.manager_repo_filter = match self.manager_repo_filter {
+            repo_manager_sidebar::RepoOwnershipFilter::All => "all".to_string(),
+            repo_manager_sidebar::RepoOwnershipFilter::Owned => "owned".to_string(),
+            repo_manager_sidebar::RepoOwnershipFilter::External => "external".to_string(),
+        };
+        session.save();
+    }
+
+    fn next_repo_live_generation(&mut self) -> u64 {
+        self.repo_live_generation = self.repo_live_generation.saturating_add(1);
+        self.repo_live_generation
+    }
+
+    fn ensure_repo_tracker(&mut self, path: &str, ctx: &egui::Context) {
+        if self.repo_live_trackers.contains_key(path) {
+            return;
+        }
+
+        let generation = self.next_repo_live_generation();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.repo_live_states
+            .entry(path.to_string())
+            .and_modify(|entry| {
+                entry.generation = generation;
+            })
+            .or_insert(RepoLiveState {
+                generation,
+                local: None,
+                remote: None,
+            });
+
+        palimpsest::git::live::spawn_repo_tracker(
+            path.to_string(),
+            generation,
+            self.repo_live_tx.clone(),
+            stop.clone(),
+            ctx.clone(),
+            self.authed_github_login.clone(),
+        );
+
+        self.repo_live_trackers
+            .insert(path.to_string(), RepoTrackerHandle { stop });
+    }
+
+    fn stop_repo_tracker(&mut self, path: &str) {
+        if let Some(handle) = self.repo_live_trackers.remove(path) {
+            handle.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn process_repo_live_updates(&mut self, ctx: &egui::Context) {
+        let mut changed = false;
+
+        while let Ok(event) = self.repo_live_rx.try_recv() {
+            match event {
+                RepoLiveEvent::Local {
+                    path,
+                    generation,
+                    snapshot,
+                } => {
+                    let Some(entry) = self.repo_live_states.get_mut(&path) else {
+                        continue;
+                    };
+                    if entry.generation != generation {
+                        continue;
+                    }
+                    entry.local = Some(snapshot.clone());
+                    if self.store.get_state().current_repo.as_deref() == Some(&path) {
+                        self.store.dispatch(AppAction::RefreshGitData {
+                            commits: snapshot.commits.clone(),
+                            branches: snapshot.branches.clone(),
+                            remotes: snapshot.remotes.clone(),
+                            tags: snapshot.tags.clone(),
+                            stashes: snapshot.stashes.clone(),
+                            status: snapshot.status.clone(),
+                        });
+                        self.store
+                            .dispatch(AppAction::SetRepoError(snapshot.repo_error.clone()));
+                        changed = true;
+                    }
+                }
+                RepoLiveEvent::Remote {
+                    path,
+                    generation,
+                    snapshot,
+                } => {
+                    let Some(entry) = self.repo_live_states.get_mut(&path) else {
+                        continue;
+                    };
+                    if entry.generation != generation {
+                        continue;
+                    }
+                    entry.remote = Some(snapshot.clone());
+                    if self.store.get_state().current_repo.as_deref() == Some(&path) {
+                        self.current_repo_owned_by_authed_user =
+                            Some(matches!(snapshot.ownership, RepoOwnership::Owned));
+                        if snapshot.ownership == RepoOwnership::External {
+                            self.store.dispatch(AppAction::SetGitHubData {
+                                pull_requests: Vec::new(),
+                                action_runs: Vec::new(),
+                                releases: Vec::new(),
+                                packages: Vec::new(),
+                            });
+                            self.store.dispatch(AppAction::SetGitHubError(Some(
+                                "GitHub repo is not owned by the authenticated user".to_string(),
+                            )));
+                            changed = true;
+                            continue;
+                        }
+                        self.store.dispatch(AppAction::SetGitHubData {
+                            pull_requests: snapshot.pull_requests.clone(),
+                            action_runs: snapshot.action_runs.clone(),
+                            releases: snapshot.releases.clone(),
+                            packages: snapshot.packages.clone(),
+                        });
+                        self.store
+                            .dispatch(AppAction::SetGitHubError(snapshot.github_error.clone()));
+                        changed = true;
+                    }
+                }
+                RepoLiveEvent::Ownership {
+                    path,
+                    generation,
+                    ownership,
+                } => {
+                    let Some(entry) = self.repo_live_states.get_mut(&path) else {
+                        continue;
+                    };
+                    if entry.generation != generation {
+                        continue;
+                    }
+                    self.store.dispatch(AppAction::SetRepoOwnership {
+                        path: path.clone(),
+                        owned: ownership,
+                    });
+                    if self.store.get_state().current_repo.as_deref() == Some(&path) {
+                        self.current_repo_owned_by_authed_user = ownership;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if changed {
+            ctx.request_repaint();
+        }
+    }
+
+    fn sync_active_repo_from_cache(&mut self, path: &str) {
+        let Some(entry) = self.repo_live_states.get(path) else {
+            return;
+        };
+
+        if let Some(local) = &entry.local {
+            self.store.dispatch(AppAction::RefreshGitData {
+                commits: local.commits.clone(),
+                branches: local.branches.clone(),
+                remotes: local.remotes.clone(),
+                tags: local.tags.clone(),
+                stashes: local.stashes.clone(),
+                status: local.status.clone(),
+            });
+            self.store
+                .dispatch(AppAction::SetRepoError(local.repo_error.clone()));
+        }
+
+        if let Some(remote) = &entry.remote {
+            if remote.ownership != RepoOwnership::External {
+                self.current_repo_owned_by_authed_user =
+                    Some(matches!(remote.ownership, RepoOwnership::Owned));
+                self.store.dispatch(AppAction::SetGitHubData {
+                    pull_requests: remote.pull_requests.clone(),
+                    action_runs: remote.action_runs.clone(),
+                    releases: remote.releases.clone(),
+                    packages: remote.packages.clone(),
+                });
+                self.store
+                    .dispatch(AppAction::SetGitHubError(remote.github_error.clone()));
+            }
+        }
     }
 
     fn restore_active_repo_from_state(&mut self) {
         let state = self.store.get_state();
+        let ctx = self.egui_ctx.clone();
+        for path in state.open_tabs.iter() {
+            self.ensure_repo_tracker(path, &ctx);
+        }
         if let Some(path) = state.current_repo.clone() {
             if self.git_repo.is_none() {
                 self.open_repo(&path);
@@ -204,6 +427,8 @@ impl PalimpsestApp {
             Ok(repo) => {
                 tracing::info!(repo_name = ?repo.repo_name(), "Repository opened successfully");
                 self.git_repo = Some(repo);
+                let ctx = self.egui_ctx.clone();
+                self.ensure_repo_tracker(path, &ctx);
                 self.store.dispatch(AppAction::OpenRepo(path.to_string()));
                 self.refresh_git_data();
                 self.persist_session();
@@ -243,12 +468,17 @@ impl PalimpsestApp {
         if let Some(path) = self.store.get_state().current_repo.clone() {
             self.git_repo = None;
             self.open_repo(&path);
+            self.sync_active_repo_from_cache(&path);
             self.persist_session();
         }
     }
 
     fn close_tab(&mut self, index: usize) {
+        let closed_path = self.store.get_state().open_tabs.get(index).cloned();
         self.store.dispatch(AppAction::CloseTab(index));
+        if let Some(path) = closed_path {
+            self.stop_repo_tracker(&path);
+        }
         self.git_repo = None;
         if let Some(path) = self.store.get_state().current_repo.clone() {
             self.open_repo(&path);
@@ -259,75 +489,20 @@ impl PalimpsestApp {
 
     fn refresh_git_data(&mut self) {
         if let Some(repo) = &self.git_repo {
-            let mut errors = Vec::new();
-
-            let commits = match repo.commits(Some(200)) {
-                Ok(c) => c,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let branches = match repo.branches() {
-                Ok(b) => b,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let remotes = match repo.remotes() {
-                Ok(r) => r,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let tags = match repo.tags() {
-                Ok(t) => t,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let stashes = match repo.stashes() {
-                Ok(s) => s,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let status = match repo.status() {
-                Ok(s) => s,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    palimpsest::git::models::RepoStatus {
-                        branch: "HEAD".to_string(),
-                        staged_count: 0,
-                        unstaged_count: 0,
-                        staged_files: Vec::new(),
-                        unstaged_files: Vec::new(),
-                        additions: 0,
-                        deletions: 0,
-                        files_changed: 0,
-                    }
-                }
-            };
-
+            let snapshot = palimpsest::git::live::collect_local_snapshot(
+                repo,
+                self.authed_github_login.as_deref(),
+            );
             self.store.dispatch(AppAction::RefreshGitData {
-                commits,
-                branches,
-                remotes,
-                tags,
-                stashes,
-                status,
+                commits: snapshot.commits.clone(),
+                branches: snapshot.branches.clone(),
+                remotes: snapshot.remotes.clone(),
+                tags: snapshot.tags.clone(),
+                stashes: snapshot.stashes.clone(),
+                status: snapshot.status.clone(),
             });
-
-            if errors.is_empty() {
-                self.store.dispatch(AppAction::SetRepoError(None));
-            } else {
-                self.store
-                    .dispatch(AppAction::SetRepoError(Some(errors.join("; "))));
-            }
+            self.store
+                .dispatch(AppAction::SetRepoError(snapshot.repo_error.clone()));
         }
     }
 
@@ -634,7 +809,15 @@ impl PalimpsestApp {
                     )
                 });
 
+                let state = self.store.get_state();
                 let remotes = repo.remotes().unwrap_or_default();
+                let owned_by_authed_user = state.github_user.as_ref().map(|user| {
+                    remotes.iter().any(|remote| {
+                        let login = &user.login;
+                        remote.url.contains(&format!("github.com/{}/", login))
+                            || remote.url.contains(&format!("git@github.com:{}", login))
+                    })
+                });
                 let manager_remotes: Vec<ManagerRemote> = remotes
                     .iter()
                     .map(|r| {
@@ -723,6 +906,7 @@ impl PalimpsestApp {
                     branches: manager_branches,
                     tags: manager_tags,
                     commits: manager_commits,
+                    owned_by_authed_user,
                 };
 
                 self.store
@@ -740,6 +924,7 @@ impl PalimpsestApp {
 
 impl eframe::App for PalimpsestApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.process_repo_live_updates(ui.ctx());
         let background = ui.visuals().widgets.inactive.bg_fill;
         ui.painter().rect_filled(ui.max_rect(), 0.0, background);
 
@@ -959,6 +1144,7 @@ impl eframe::App for PalimpsestApp {
             state.github_user.as_ref(),
             state.git_identity.as_ref(),
             &state.auth_status,
+            self.current_repo_owned_by_authed_user,
         );
 
         if show_window_buttons != self.store.get_state().show_window_buttons {
@@ -1134,7 +1320,14 @@ impl eframe::App for PalimpsestApp {
                         .id_salt("manager_sidebar")
                         .max_rect(sidebar_rect)
                         .layout(egui::Layout::top_down(egui::Align::Min)),
-                    |ui| repo_manager_sidebar::show(ui, &mut self.manager_sidebar_state, &state),
+                    |ui| {
+                        repo_manager_sidebar::show(
+                            ui,
+                            &mut self.manager_sidebar_state,
+                            &state,
+                            self.manager_repo_filter,
+                        )
+                    },
                 )
                 .inner
             {
@@ -1143,6 +1336,11 @@ impl eframe::App for PalimpsestApp {
                         self.store
                             .dispatch(AppAction::SelectManagerRepo(Some(path.clone())));
                         self.fetch_manager_details(&path);
+                    }
+                    repo_manager_sidebar::ManagerSidebarAction::SetFilter(filter) => {
+                        self.manager_repo_filter = filter;
+                        tracing::info!(filter = ?self.manager_repo_filter, "Updated manager repo filter");
+                        self.persist_session();
                     }
                 }
             }
@@ -1153,7 +1351,24 @@ impl eframe::App for PalimpsestApp {
                         .id_salt("manager_body")
                         .max_rect(body_rect)
                         .layout(egui::Layout::top_down(egui::Align::Min)),
-                    |ui| repo_manager_body::show(ui, &mut self.manager_body_state, &state),
+                    |ui| {
+                        repo_manager_body::show(
+                            ui,
+                            &mut self.manager_body_state,
+                            &state,
+                            match self.manager_repo_filter {
+                                repo_manager_sidebar::RepoOwnershipFilter::All => {
+                                    RepoOwnershipFilterLabel::All
+                                }
+                                repo_manager_sidebar::RepoOwnershipFilter::Owned => {
+                                    RepoOwnershipFilterLabel::Owned
+                                }
+                                repo_manager_sidebar::RepoOwnershipFilter::External => {
+                                    RepoOwnershipFilterLabel::External
+                                }
+                            },
+                        )
+                    },
                 )
                 .inner
             {
@@ -1288,6 +1503,15 @@ impl eframe::App for PalimpsestApp {
 
         if self.debug_open {
             show_debug_window(ui.ctx(), &self.log_buffer, &mut self.debug_open);
+        }
+    }
+}
+
+impl Drop for PalimpsestApp {
+    fn drop(&mut self) {
+        let paths: Vec<String> = self.repo_live_trackers.keys().cloned().collect();
+        for path in paths {
+            self.stop_repo_tracker(&path);
         }
     }
 }
@@ -1465,12 +1689,6 @@ fn parse_github_remote(url: &str) -> Option<(String, String)> {
         }
     }
     None
-}
-
-impl Drop for PalimpsestApp {
-    fn drop(&mut self) {
-        self.persist_session();
-    }
 }
 
 fn show_error_banner(ui: &egui::Ui, error: &str) {

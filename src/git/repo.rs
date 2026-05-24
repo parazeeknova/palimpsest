@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use git2::{Repository, Sort, StashFlags, StatusOptions};
@@ -26,6 +27,14 @@ impl GitRepo {
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .map(|s| s.to_string())
+    }
+
+    pub fn workdir_path(&self) -> Option<PathBuf> {
+        self.repo.workdir().map(|p| p.to_path_buf())
+    }
+
+    pub fn git_dir_path(&self) -> PathBuf {
+        self.repo.path().to_path_buf()
     }
 
     pub fn head_branch(&self) -> Result<String, GitError> {

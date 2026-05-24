@@ -24,6 +24,8 @@ pub struct AppSession {
     pub active_tab: Option<usize>,
     pub recent_repos: Vec<RecentRepo>,
     pub show_window_buttons: bool,
+    #[serde(default = "default_manager_repo_filter")]
+    pub manager_repo_filter: String,
     #[serde(default)]
     pub setup_completed: bool,
     #[serde(default)]
@@ -40,6 +42,7 @@ impl Default for AppSession {
             active_tab: None,
             recent_repos: Vec::new(),
             show_window_buttons: true,
+            manager_repo_filter: default_manager_repo_filter(),
             setup_completed: false,
             git_user_name: None,
             git_user_email: None,
@@ -69,6 +72,7 @@ impl AppSession {
             active_tab: state.active_tab,
             recent_repos: state.recent_repos.clone(),
             show_window_buttons: state.show_window_buttons,
+            manager_repo_filter: state.manager_repo_filter.clone(),
             setup_completed: state.setup_completed,
             git_user_name: state.git_identity.as_ref().and_then(|i| i.name.clone()),
             git_user_email: state.git_identity.as_ref().and_then(|i| i.email.clone()),
@@ -99,6 +103,8 @@ impl AppSession {
             manager_selected_repo: None,
             manager_details: None,
             manager_details_cache: Vec::new(),
+            repo_ownership: Vec::new(),
+            manager_repo_filter: session.manager_repo_filter,
             github_user: None,
             git_identity: if session.git_user_name.is_some() || session.git_user_email.is_some() {
                 Some(CachedGitIdentity {
@@ -205,6 +211,10 @@ impl AppSession {
     }
 }
 
+fn default_manager_repo_filter() -> String {
+    "all".to_string()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppState {
     pub open_tabs: Vec<String>,
@@ -223,6 +233,8 @@ pub struct AppState {
     pub manager_selected_repo: Option<String>,
     pub manager_details: Option<ManagerRepoDetails>,
     pub manager_details_cache: Vec<(String, ManagerRepoDetails)>,
+    pub repo_ownership: Vec<(String, Option<bool>)>,
+    pub manager_repo_filter: String,
     pub github_user: Option<GitHubUserProfile>,
     pub git_identity: Option<CachedGitIdentity>,
     pub auth_status: AuthStatus,
@@ -253,6 +265,8 @@ impl PartialEq for AppState {
             && self.manager_selected_repo == other.manager_selected_repo
             && self.manager_details == other.manager_details
             && self.manager_details_cache == other.manager_details_cache
+            && self.repo_ownership == other.repo_ownership
+            && self.manager_repo_filter == other.manager_repo_filter
             && self.github_user == other.github_user
             && self.git_identity == other.git_identity
             && self.auth_status == other.auth_status
@@ -348,6 +362,8 @@ pub struct ManagerRepoDetails {
     pub branches: Vec<ManagerBranch>,
     pub tags: Vec<ManagerTag>,
     pub commits: Vec<ManagerCommit>,
+    #[serde(default)]
+    pub owned_by_authed_user: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -467,6 +483,8 @@ impl Default for AppState {
             manager_selected_repo: None,
             manager_details: None,
             manager_details_cache: Vec::new(),
+            repo_ownership: Vec::new(),
+            manager_repo_filter: default_manager_repo_filter(),
             github_user: None,
             git_identity: None,
             auth_status: AuthStatus::Unknown,
@@ -570,7 +588,16 @@ impl AppState {
         self.github_packages.clear();
         self.github_loading = false;
         self.github_error = None;
+        self.repo_ownership.clear();
         self
+    }
+
+    pub fn repo_ownership_for(&self, path: &str) -> Option<bool> {
+        self.repo_ownership
+            .iter()
+            .rev()
+            .find(|(p, _)| p == path)
+            .and_then(|(_, owned)| *owned)
     }
 
     pub fn push_recent(mut self, path: &str) -> Self {
@@ -726,6 +753,11 @@ pub enum AppAction {
     SetRepoError(Option<String>),
     SelectManagerRepo(Option<String>),
     SetManagerDetails(Option<ManagerRepoDetails>),
+    SetRepoOwnership {
+        path: String,
+        owned: Option<bool>,
+    },
+    SetManagerRepoFilter(String),
     RemoveRecentRepo(String),
     SetGitHubUser(Option<GitHubUserProfile>),
     SetGitIdentity(Option<CachedGitIdentity>),
@@ -853,6 +885,18 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
                 ..state.clone()
             }
         }
+        AppAction::SetRepoOwnership { path, owned } => AppState {
+            repo_ownership: {
+                let mut ownership = state.repo_ownership.clone();
+                ownership.push((path.clone(), *owned));
+                ownership
+            },
+            ..state.clone()
+        },
+        AppAction::SetManagerRepoFilter(filter) => AppState {
+            manager_repo_filter: filter.clone(),
+            ..state.clone()
+        },
         AppAction::RemoveRecentRepo(path) => AppState {
             recent_repos: state
                 .recent_repos
@@ -872,6 +916,12 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
             },
             manager_details_cache: state
                 .manager_details_cache
+                .clone()
+                .into_iter()
+                .filter(|(k, _)| k != path)
+                .collect(),
+            repo_ownership: state
+                .repo_ownership
                 .clone()
                 .into_iter()
                 .filter(|(k, _)| k != path)
@@ -1150,6 +1200,7 @@ mod tests {
                 },
             ],
             show_window_buttons: false,
+            manager_repo_filter: "owned".to_string(),
             setup_completed: false,
             git_user_name: None,
             git_user_email: None,
@@ -1160,6 +1211,62 @@ mod tests {
 
         assert_eq!(restored, session);
         assert_eq!(state.current_repo, Some("/two".to_string()));
+    }
+
+    #[test]
+    fn test_app_session_default_manager_repo_filter() {
+        assert_eq!(AppSession::default().manager_repo_filter, "all");
+    }
+
+    #[test]
+    fn test_set_repo_ownership_updates_lookup_true() {
+        let state = AppState::default();
+        let result = reducer(
+            &state,
+            &AppAction::SetRepoOwnership {
+                path: "/repo1".to_string(),
+                owned: Some(true),
+            },
+        );
+        assert_eq!(result.repo_ownership_for("/repo1"), Some(true));
+    }
+
+    #[test]
+    fn test_app_session_from_state_uses_default_manager_repo_filter() {
+        let state = AppState::default();
+        let session = AppSession::from_state(&state);
+        assert_eq!(session.manager_repo_filter, "all");
+    }
+
+    #[test]
+    fn test_set_manager_repo_filter_updates_state() {
+        let state = AppState::default();
+        let result = reducer(
+            &state,
+            &AppAction::SetManagerRepoFilter("owned".to_string()),
+        );
+        assert_eq!(result.manager_repo_filter, "owned");
+    }
+
+    #[test]
+    fn test_manager_repo_details_serializes_ownership() {
+        let details = ManagerRepoDetails {
+            repo_path: "/repo".to_string(),
+            repo_name: "repo".to_string(),
+            branch: "main".to_string(),
+            uncommitted_files: 0,
+            total_commits: 1,
+            initial_commit_date: "just now".to_string(),
+            last_commit_date: "just now".to_string(),
+            remotes: vec![],
+            branches: vec![],
+            tags: vec![],
+            commits: vec![],
+            owned_by_authed_user: Some(true),
+        };
+        let json = serde_json::to_string(&details).unwrap();
+        let round_trip: ManagerRepoDetails = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_trip.owned_by_authed_user, Some(true));
     }
 
     #[test]
@@ -1215,6 +1322,7 @@ mod tests {
             branches: vec![],
             tags: vec![],
             commits: vec![],
+            owned_by_authed_user: Some(true),
         };
         let state = AppState {
             manager_selected_repo: Some("/repo1".to_string()),
@@ -1244,6 +1352,7 @@ mod tests {
             branches: vec![],
             tags: vec![],
             commits: vec![],
+            owned_by_authed_user: Some(true),
         };
         let state = AppState {
             manager_selected_repo: Some("/repo1".to_string()),
@@ -1251,6 +1360,19 @@ mod tests {
         };
         let result = reducer(&state, &AppAction::SetManagerDetails(Some(details.clone())));
         assert_eq!(result.manager_details, Some(details));
+    }
+
+    #[test]
+    fn test_set_repo_ownership_updates_lookup_false() {
+        let state = AppState::default();
+        let result = reducer(
+            &state,
+            &AppAction::SetRepoOwnership {
+                path: "/repo1".to_string(),
+                owned: Some(false),
+            },
+        );
+        assert_eq!(result.repo_ownership_for("/repo1"), Some(false));
     }
 
     #[test]
@@ -1308,6 +1430,7 @@ mod tests {
             branches: vec![],
             tags: vec![],
             commits: vec![],
+            owned_by_authed_user: Some(true),
         };
         let state = AppState {
             recent_repos: vec![
@@ -1369,6 +1492,7 @@ mod tests {
                 author: "Charlie".to_string(),
                 relative_date: "just now".to_string(),
             }],
+            owned_by_authed_user: Some(false),
         };
 
         let serialized = serde_json::to_string(&details).unwrap();

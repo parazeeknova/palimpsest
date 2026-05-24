@@ -1,4 +1,4 @@
-.PHONY: check check-types fmt install-hooks bump-version update release-tag clean-local
+.PHONY: test check check-types fmt install-hooks bump-version update release-tag clean-local
 
 dev:
 	cargo run
@@ -11,6 +11,9 @@ clean-local:
 
 check:
 	./scripts/check.sh
+
+test:
+	./scripts/test.sh
 
 check-types:
 	./scripts/check-types.sh

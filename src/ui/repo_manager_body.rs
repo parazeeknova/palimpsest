@@ -5,6 +5,7 @@ use egui_phosphor::regular::{
 };
 
 use crate::state::{AppState, ManagerRepoDetails};
+use crate::ui::repo_manager::{RepoOwnershipFilterLabel, ownership_badge_text};
 
 pub struct State {
     branches_expanded: bool,
@@ -24,7 +25,12 @@ const ROW_HEIGHT: f32 = 28.0;
 const SECTION_GAP: f32 = 12.0;
 const SECTION_HEADER_HEIGHT: f32 = 32.0;
 
-pub fn show(ui: &mut egui::Ui, state: &mut State, app_state: &AppState) -> Option<String> {
+pub fn show(
+    ui: &mut egui::Ui,
+    state: &mut State,
+    app_state: &AppState,
+    filter: RepoOwnershipFilterLabel,
+) -> Option<String> {
     let rect = ui.available_rect_before_wrap();
     let (rect, _) = ui.allocate_exact_size(rect.size(), egui::Sense::hover());
 
@@ -38,7 +44,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut State, app_state: &AppState) -> Optio
 
     let mut y = rect.top();
 
-    if let Some(open_path) = paint_top_bar(ui, rect, y, details) {
+    if let Some(open_path) = paint_top_bar(ui, rect, y, details, filter) {
         return Some(open_path);
     }
     y += 64.0;
@@ -93,6 +99,7 @@ fn paint_top_bar(
     rect: egui::Rect,
     y: f32,
     details: &ManagerRepoDetails,
+    filter: RepoOwnershipFilterLabel,
 ) -> Option<String> {
     let row_height = 72.0;
     let row = egui::Rect::from_min_size(
@@ -127,6 +134,22 @@ fn paint_top_bar(
         &details.repo_path,
         egui::FontId::proportional(11.0),
         egui::Color32::from_rgb(140, 140, 140),
+    );
+
+    let ownership_text = ownership_badge_text(details.owned_by_authed_user);
+    ui.painter().text(
+        egui::pos2(left_x, center_y - 18.0),
+        egui::Align2::LEFT_CENTER,
+        ownership_text,
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_rgb(160, 160, 160),
+    );
+    ui.painter().text(
+        egui::pos2(left_x + 120.0, center_y - 18.0),
+        egui::Align2::LEFT_CENTER,
+        filter.label(),
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_rgb(160, 160, 160),
     );
 
     let open_btn_width = 70.0;

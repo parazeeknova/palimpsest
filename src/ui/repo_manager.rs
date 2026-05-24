@@ -97,6 +97,31 @@ pub fn parse_tag_version(tag: &str) -> (u64, u64, u64) {
     (major, minor, patch)
 }
 
+pub fn ownership_badge_text(owned: Option<bool>) -> &'static str {
+    match owned {
+        Some(true) => "Owned by you",
+        Some(false) => "External repo",
+        None => "Ownership unknown",
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepoOwnershipFilterLabel {
+    All,
+    Owned,
+    External,
+}
+
+impl RepoOwnershipFilterLabel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All repos",
+            Self::Owned => "Owned repos",
+            Self::External => "External repos",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -84,6 +84,7 @@ pub fn show(
                             )
                             .clicked()
                         {
+                            tracing::info!("Profile panel: clicked Re-run Setup Wizard (unauthenticated user)");
                             action = ProfileAction::RerunSetup;
                             state.open = false;
                         }
@@ -252,6 +253,7 @@ pub fn show(
                         .button(egui::RichText::new("View GitHub Profile").size(12.0))
                         .clicked()
                 {
+                    tracing::info!("Profile panel: clicked View GitHub Profile");
                     action = ProfileAction::OpenGitHubProfile;
                     state.open = false;
                 }
@@ -260,6 +262,7 @@ pub fn show(
                     .button(egui::RichText::new("Re-run Setup Wizard").size(12.0))
                     .clicked()
                 {
+                    tracing::info!("Profile panel: clicked Re-run Setup Wizard");
                     action = ProfileAction::RerunSetup;
                     state.open = false;
                 }
@@ -273,6 +276,7 @@ pub fn show(
                         )
                         .clicked()
                 {
+                    tracing::info!("Profile panel: clicked Sign Out of GitHub");
                     action = ProfileAction::SignOut;
                     state.open = false;
                 }
