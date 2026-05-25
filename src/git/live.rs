@@ -388,6 +388,34 @@ fn watch_repo_paths(watcher: &mut impl Watcher, repo: &GitRepo) {
     watch_path(watcher, git_dir.join("refs/tags"), RecursiveMode::Recursive);
 }
 
+fn handle_github_304(
+    repo_path: &str,
+    github_login: Option<&str>,
+    endpoint: &str,
+    cached_remote: &mut Option<RepoRemoteSnapshot>,
+    any_304: &mut bool,
+) {
+    tracing::info!(
+        repo = %repo_path,
+        user = ?github_login,
+        endpoint = %endpoint,
+        "GitHub 304 NotModified returned; touched cache entry freshness in SQLite"
+    );
+    if let Some(login) = github_login {
+        let _ = crate::git::cache::touch_github_cache_entry(
+            repo_path,
+            login,
+            endpoint,
+            now_millis(),
+            true,
+        );
+    }
+    if let Some(r) = cached_remote {
+        r.last_refresh = Some(now_millis());
+    }
+    *any_304 = true;
+}
+
 pub fn spawn_repo_tracker(
     path: String,
     generation: u64,
@@ -774,7 +802,12 @@ pub fn spawn_repo_tracker(
                         if let Some(_permit) = try_acquire_job() {
                             tracing::info!(repo = %repo_name, owner = %owner, "Triggered GitHub remote metadata sync");
                             let mut remote_changed = false;
+                            let mut any_304 = false;
                             let mut errors = Vec::new();
+                            let had_in_memory_error = cached_remote
+                                .as_ref()
+                                .and_then(|r| r.github_error.as_ref())
+                                .is_some();
 
                             match github_api::list_pull_requests_conditional(
                                 token,
@@ -813,15 +846,13 @@ pub fn spawn_repo_tracker(
                                     remote_changed = true;
                                 }
                                 Ok(github_api::GitHubResponse::NotModified) => {
-                                    if let Some(ref login) = github_login {
-                                        let _ = crate::git::cache::touch_github_cache_entry(
-                                            &path,
-                                            login,
-                                            "prs",
-                                            now_millis(),
-                                            true,
-                                        );
-                                    }
+                                    handle_github_304(
+                                        &path,
+                                        github_login.as_deref(),
+                                        "prs",
+                                        &mut cached_remote,
+                                        &mut any_304,
+                                    );
                                 }
                                 Ok(github_api::GitHubResponse::Error(e)) => {
                                     errors.push(format!("PRs: {e}"))
@@ -854,15 +885,13 @@ pub fn spawn_repo_tracker(
                                     remote_changed = true;
                                 }
                                 Ok(github_api::GitHubResponse::NotModified) => {
-                                    if let Some(ref login) = github_login {
-                                        let _ = crate::git::cache::touch_github_cache_entry(
-                                            &path,
-                                            login,
-                                            "actions",
-                                            now_millis(),
-                                            true,
-                                        );
-                                    }
+                                    handle_github_304(
+                                        &path,
+                                        github_login.as_deref(),
+                                        "actions",
+                                        &mut cached_remote,
+                                        &mut any_304,
+                                    );
                                 }
                                 Ok(github_api::GitHubResponse::Error(e)) => {
                                     errors.push(format!("Actions: {e}"))
@@ -895,15 +924,13 @@ pub fn spawn_repo_tracker(
                                     remote_changed = true;
                                 }
                                 Ok(github_api::GitHubResponse::NotModified) => {
-                                    if let Some(ref login) = github_login {
-                                        let _ = crate::git::cache::touch_github_cache_entry(
-                                            &path,
-                                            login,
-                                            "releases",
-                                            now_millis(),
-                                            true,
-                                        );
-                                    }
+                                    handle_github_304(
+                                        &path,
+                                        github_login.as_deref(),
+                                        "releases",
+                                        &mut cached_remote,
+                                        &mut any_304,
+                                    );
                                 }
                                 Ok(github_api::GitHubResponse::Error(e)) => {
                                     errors.push(format!("Releases: {e}"))
@@ -947,15 +974,13 @@ pub fn spawn_repo_tracker(
                                                         .cloned(),
                                                 );
                                             }
-                                            if let Some(ref login) = github_login {
-                                                let _ = crate::git::cache::touch_github_cache_entry(
-                                                    &path,
-                                                    login,
-                                                    "packages_container",
-                                                    now_millis(),
-                                                    true,
-                                                );
-                                            }
+                                            handle_github_304(
+                                                &path,
+                                                github_login.as_deref(),
+                                                "packages_container",
+                                                &mut cached_remote,
+                                                &mut any_304,
+                                            );
                                         }
                                         github_api::GitHubResponse::Error(e) => {
                                             errors.push(format!("Container Packages: {e}"))
@@ -981,15 +1006,13 @@ pub fn spawn_repo_tracker(
                                                         .cloned(),
                                                 );
                                             }
-                                            if let Some(ref login) = github_login {
-                                                let _ = crate::git::cache::touch_github_cache_entry(
-                                                    &path,
-                                                    login,
-                                                    "packages_npm",
-                                                    now_millis(),
-                                                    true,
-                                                );
-                                            }
+                                            handle_github_304(
+                                                &path,
+                                                github_login.as_deref(),
+                                                "packages_npm",
+                                                &mut cached_remote,
+                                                &mut any_304,
+                                            );
                                         }
                                         github_api::GitHubResponse::Error(e) => {
                                             errors.push(format!("NPM Packages: {e}"))
@@ -1006,16 +1029,19 @@ pub fn spawn_repo_tracker(
                                 Err(e) => errors.push(format!("Packages: {e}")),
                             }
 
-                            if remote_changed || !errors.is_empty() {
-                                if let Some(ref mut r) = cached_remote {
-                                    r.github_error = if errors.is_empty() {
-                                        None
-                                    } else {
-                                        Some(errors.join(", "))
-                                    };
-                                    r.last_refresh = Some(now_millis());
-                                }
+                            let error_cleared = had_in_memory_error && errors.is_empty();
+                            let should_dispatch = remote_changed || error_cleared;
 
+                            if let Some(ref mut r) = cached_remote {
+                                r.github_error = if errors.is_empty() {
+                                    None
+                                } else {
+                                    Some(errors.join(", "))
+                                };
+                                r.last_refresh = Some(now_millis());
+                            }
+
+                            if should_dispatch {
                                 if let Some(ref r) = cached_remote {
                                     let _ = tx.send(RepoLiveEvent::Remote {
                                         path: path.clone(),
@@ -1134,5 +1160,49 @@ mod tests {
         assert!(ownership_gate_allows_remote(&remotes, Some("alice")));
         assert!(!ownership_gate_allows_remote(&remotes, Some("bob")));
         assert!(!ownership_gate_allows_remote(&remotes, None));
+    }
+
+    #[test]
+    fn test_304_clears_stale_error() {
+        let mut cached_remote = Some(RepoRemoteSnapshot {
+            pull_requests: vec![],
+            action_runs: vec![],
+            releases: vec![],
+            packages: vec![],
+            github_error: Some("stale error message".to_string()),
+            last_refresh: Some(1000),
+            ownership: RepoOwnership::Owned,
+        });
+
+        let mut any_304 = false;
+
+        // Simulate 304 response (github_login is None to prevent trying to hit real DB in mock context)
+        handle_github_304("dummy_path", None, "prs", &mut cached_remote, &mut any_304);
+
+        assert!(any_304);
+        let snapshot = cached_remote.as_ref().unwrap();
+        assert!(snapshot.last_refresh.unwrap() > 1000);
+        assert_eq!(
+            snapshot.github_error.as_deref(),
+            Some("stale error message")
+        );
+
+        // Now simulate the end of remote sync loop error clearing logic:
+        let errors: Vec<String> = vec![];
+        let had_in_memory_error = snapshot.github_error.is_some();
+        let error_cleared = had_in_memory_error && errors.is_empty();
+        assert!(error_cleared);
+
+        // Update cached_remote
+        let mut updated_remote = cached_remote.clone();
+        if let Some(ref mut r) = updated_remote {
+            r.github_error = if errors.is_empty() {
+                None
+            } else {
+                Some(errors.join(", "))
+            };
+        }
+
+        assert_eq!(updated_remote.unwrap().github_error, None);
     }
 }

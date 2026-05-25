@@ -356,8 +356,11 @@ impl PalimpsestApp {
                     }
                     entry.remote = Some(snapshot.clone());
                     if self.store.get_state().current_repo.as_deref() == Some(&path) {
-                        self.current_repo_owned_by_authed_user =
-                            Some(matches!(snapshot.ownership, RepoOwnership::Owned));
+                        self.current_repo_owned_by_authed_user = match snapshot.ownership {
+                            RepoOwnership::Owned => Some(true),
+                            RepoOwnership::External => Some(false),
+                            RepoOwnership::Unknown => None,
+                        };
                         if snapshot.ownership == RepoOwnership::External {
                             self.store.dispatch(AppAction::SetGitHubData {
                                 pull_requests: Vec::new(),
@@ -429,9 +432,12 @@ impl PalimpsestApp {
         }
 
         if let Some(remote) = &entry.remote {
+            self.current_repo_owned_by_authed_user = match remote.ownership {
+                RepoOwnership::Owned => Some(true),
+                RepoOwnership::External => Some(false),
+                RepoOwnership::Unknown => None,
+            };
             if remote.ownership != RepoOwnership::External {
-                self.current_repo_owned_by_authed_user =
-                    Some(matches!(remote.ownership, RepoOwnership::Owned));
                 self.store.dispatch(AppAction::SetGitHubData {
                     pull_requests: remote.pull_requests.clone(),
                     action_runs: remote.action_runs.clone(),

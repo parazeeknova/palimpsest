@@ -709,6 +709,7 @@ pub fn save_status_slice(
 
     save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
     tx.commit().map_err(|e| e.to_string())?;
+    tracing::debug!(repo = %repo_path, "Successfully saved status slice to SQLite");
     Ok(())
 }
 
@@ -756,6 +757,7 @@ pub fn save_commits_slice(
 
     save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
     tx.commit().map_err(|e| e.to_string())?;
+    tracing::debug!(repo = %repo_path, count = commits.len(), "Successfully saved commits slice to SQLite");
     Ok(())
 }
 
@@ -795,6 +797,7 @@ pub fn save_refs_slice(
 
     save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
     tx.commit().map_err(|e| e.to_string())?;
+    tracing::debug!(repo = %repo_path, count = branches.len(), "Successfully saved refs/branches slice to SQLite");
     Ok(())
 }
 
@@ -826,6 +829,7 @@ pub fn save_remotes_slice(
 
     save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
     tx.commit().map_err(|e| e.to_string())?;
+    tracing::debug!(repo = %repo_path, count = remotes.len(), "Successfully saved remotes slice to SQLite");
     Ok(())
 }
 
@@ -863,6 +867,7 @@ pub fn save_tags_slice(
 
     save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
     tx.commit().map_err(|e| e.to_string())?;
+    tracing::debug!(repo = %repo_path, count = tags.len(), "Successfully saved tags slice to SQLite");
     Ok(())
 }
 
@@ -900,6 +905,7 @@ pub fn save_stashes_slice(
 
     save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
     tx.commit().map_err(|e| e.to_string())?;
+    tracing::debug!(repo = %repo_path, count = stashes.len(), "Successfully saved stashes slice to SQLite");
     Ok(())
 }
 
@@ -1278,7 +1284,7 @@ pub fn load_cache(repo_path: &str, auth_login: Option<&str>) -> Option<DiskCache
         });
     }
 
-    let ownership = classify_repo_ownership(&remotes, None);
+    let ownership = classify_repo_ownership(&remotes, auth_login);
 
     let local_snapshot = BoundedLocalSnapshot {
         commits,
@@ -1417,7 +1423,13 @@ pub fn load_cache(repo_path: &str, auth_login: Option<&str>) -> Option<DiskCache
         )
         .unwrap_or_default();
 
-    tracing::info!(repo = %repo_path, "Successfully hydrated repository cache from SQLite");
+    tracing::info!(
+        repo = %repo_path,
+        auth_login = ?auth_login,
+        has_remote = remote_snapshot.is_some(),
+        ownership = ?ownership,
+        "Successfully hydrated repository cache from SQLite"
+    );
     Some(DiskCache {
         schema_version: SCHEMA_VERSION,
         repo_path: repo_path.to_string(),
@@ -2283,6 +2295,88 @@ mod tests {
             .unwrap();
         assert_eq!(fetched_at, 3000);
         assert_eq!(error.as_deref(), Some("Another Error")); // error is not cleared
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_ownership_hydration_scenarios() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "palimpsest_owner_test_{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_dir.join(".git")).unwrap();
+        let _guard = TestDbGuard::new(temp_dir.join("test.db"));
+        let path_str = temp_dir.to_str().unwrap().to_string();
+
+        let local = BoundedLocalSnapshot {
+            commits: vec![],
+            branches: vec![],
+            remotes: vec![Remote {
+                name: "origin".to_string(),
+                url: "git@github.com:alice/project.git".to_string(),
+            }],
+            tags: vec![],
+            stashes: vec![],
+            status: RepoStatus {
+                branch: "main".to_string(),
+                staged_count: 0,
+                unstaged_count: 0,
+                staged_files: vec![],
+                unstaged_files: vec![],
+                additions: 0,
+                deletions: 0,
+                files_changed: 0,
+            },
+            repo_error: None,
+            last_refresh: None,
+            ownership: None,
+        };
+
+        let dc = DiskCache {
+            schema_version: SCHEMA_VERSION,
+            repo_path: path_str.clone(),
+            repo_fingerprint: "dummy-fp".to_string(),
+            captured_at: 1000,
+            local_snapshot: local,
+            remote_snapshot: Some(RepoRemoteSnapshot {
+                pull_requests: vec![],
+                action_runs: vec![],
+                releases: vec![],
+                packages: vec![],
+                github_error: None,
+                last_refresh: Some(2000),
+                ownership: RepoOwnership::Unknown,
+            }),
+            prs_etag: None,
+            actions_etag: None,
+            releases_etag: None,
+            packages_container_etag: None,
+            packages_npm_etag: None,
+        };
+
+        save_cache(&dc, Some("alice")).unwrap();
+
+        // 1. load_cache(path, Some("alice")) -> local ownership Some(true), remote ownership Owned
+        let loaded_alice = load_cache(&path_str, Some("alice")).unwrap();
+        assert_eq!(loaded_alice.local_snapshot.ownership, Some(true));
+        assert_eq!(
+            loaded_alice.remote_snapshot.unwrap().ownership,
+            RepoOwnership::Owned
+        );
+
+        // 2. load_cache(path, Some("bob")) -> local ownership Some(false), remote_snapshot is None
+        let loaded_bob = load_cache(&path_str, Some("bob")).unwrap();
+        assert_eq!(loaded_bob.local_snapshot.ownership, Some(false));
+        assert!(loaded_bob.remote_snapshot.is_none());
+
+        // 3. load_cache(path, None) -> local ownership None, remote_snapshot is None
+        let loaded_none = load_cache(&path_str, None).unwrap();
+        assert_eq!(loaded_none.local_snapshot.ownership, None);
+        assert!(loaded_none.remote_snapshot.is_none());
 
         fs::remove_dir_all(&temp_dir).unwrap();
     }
