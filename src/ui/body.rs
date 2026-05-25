@@ -3,7 +3,9 @@ use egui_phosphor::regular::{BOOKMARK, CHECK, GIT_BRANCH, PENCIL_SIMPLE, TAG};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
+use crate::git::GitRepo;
 use crate::state::{AppState, CachedBranch, CachedCommit, CachedTag};
+use crate::ui::commit_drawer;
 use crate::ui::commit_panel;
 
 const HEADER_HEIGHT: f32 = 30.0;
@@ -407,6 +409,11 @@ pub struct State {
     branch_refs: Vec<RefBadge>,
     tag_refs: Vec<RefBadge>,
     top_status_row: Option<TopStatusRow>,
+    selected_commit_hash: Option<String>,
+    selected_commit_cache_hash: Option<String>,
+    selected_commit_cache: Option<commit_drawer::CommitDrawerCommit>,
+    selected_commit_files_cache: Vec<crate::git::models::FileStatus>,
+    drawer_state: commit_drawer::State,
 }
 
 impl Default for State {
@@ -423,6 +430,11 @@ impl Default for State {
             branch_refs: Vec::new(),
             tag_refs: Vec::new(),
             top_status_row: None,
+            selected_commit_hash: None,
+            selected_commit_cache_hash: None,
+            selected_commit_cache: None,
+            selected_commit_files_cache: Vec::new(),
+            drawer_state: commit_drawer::State::default(),
         }
     }
 }
@@ -445,6 +457,48 @@ fn commit_row_for_hash(graph_data: &GraphData, hash: &str) -> Option<usize> {
         .find_map(|(idx, entry)| {
             (entry.data.hash.starts_with(hash) || entry.data.short_hash == hash).then_some(idx)
         })
+}
+
+impl State {
+    fn refresh_selected_commit_cache(&mut self, app_state: &AppState, git_repo: Option<&GitRepo>) {
+        let Some(hash) = self.selected_commit_hash.as_deref() else {
+            self.selected_commit_cache_hash = None;
+            self.selected_commit_cache = None;
+            self.selected_commit_files_cache.clear();
+            return;
+        };
+
+        if self.selected_commit_cache_hash.as_deref() == Some(hash) {
+            return;
+        }
+
+        let Some(commit) = app_state.cached_commits.iter().find(|c| c.hash == hash) else {
+            self.selected_commit_cache_hash = None;
+            self.selected_commit_cache = None;
+            self.selected_commit_files_cache.clear();
+            return;
+        };
+
+        let full_commit = git_repo.and_then(|repo| repo.commit_by_hash(hash).ok());
+        let files = git_repo
+            .and_then(|repo| repo.commit_files(hash).ok())
+            .unwrap_or_default();
+
+        self.selected_commit_cache_hash = Some(hash.to_string());
+        self.selected_commit_cache = Some(commit_drawer::CommitDrawerCommit {
+            hash: commit.hash.clone(),
+            short_hash: commit.short_hash.clone(),
+            message: commit.message.clone(),
+            author: commit.author.clone(),
+            email: full_commit
+                .as_ref()
+                .map(|c| c.email.clone())
+                .unwrap_or_default(),
+            timestamp: crate::ui::repo_manager::format_relative_time(commit.timestamp_secs),
+            parents: commit.parents.clone(),
+        });
+        self.selected_commit_files_cache = files;
+    }
 }
 
 fn build_branch_refs(graph_data: &GraphData, branches: &[CachedBranch]) -> Vec<RefBadge> {
@@ -560,6 +614,7 @@ pub fn show_cached(
     state: &mut State,
     commit_panel_state: &mut commit_panel::State,
     app_state: &AppState,
+    git_repo: Option<&GitRepo>,
 ) {
     let graph_commits_changed = state.graph_data.commits.len() != app_state.cached_commits.len()
         || state
@@ -613,10 +668,24 @@ pub fn show_cached(
             rect.right_bottom(),
         );
 
+        let drawer_height = if state.selected_commit_hash.is_some() {
+            240.0
+        } else {
+            0.0
+        };
+        let list_rect = if drawer_height > 0.0 {
+            egui::Rect::from_min_max(
+                rows_rect.left_top(),
+                egui::pos2(rows_rect.right(), rows_rect.bottom() - drawer_height),
+            )
+        } else {
+            rows_rect
+        };
+
         ui.scope_builder(
             egui::UiBuilder::new()
                 .id_salt("commit_body_scroll_host")
-                .max_rect(rows_rect)
+                .max_rect(list_rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
             |ui| {
                 egui::ScrollArea::both()
@@ -639,6 +708,23 @@ pub fn show_cached(
                     });
             },
         );
+
+        state.refresh_selected_commit_cache(app_state, git_repo);
+
+        if let Some(selected) = state.selected_commit_cache.as_ref() {
+            let drawer_rect = egui::Rect::from_min_max(
+                egui::pos2(rows_rect.left(), rows_rect.bottom() - drawer_height),
+                rows_rect.right_bottom(),
+            );
+            commit_drawer::show(
+                ui,
+                drawer_rect,
+                &mut state.drawer_state,
+                app_state,
+                Some(selected),
+                &state.selected_commit_files_cache,
+            );
+        }
     }
 
     let show_panel = app_state
@@ -843,6 +929,8 @@ fn paint_rows(
 
         if response.clicked() {
             state.selected_row = Some(row_idx);
+            state.selected_commit_hash = Some(entry.data.hash.clone());
+            state.drawer_state.tab = commit_drawer::CommitDrawerTab::Commit;
         }
 
         if response.hovered() {

@@ -88,6 +88,10 @@ struct PalimpsestApp {
     show_setup_wizard_dialog: bool,
     show_preferences_dialog: bool,
     show_update_dialog: bool,
+    show_create_tag_dialog: bool,
+    new_tag_name: String,
+    show_save_stash_dialog: bool,
+    new_stash_message: String,
 }
 
 struct RepoLiveState {
@@ -195,6 +199,10 @@ impl PalimpsestApp {
             show_setup_wizard_dialog: false,
             show_preferences_dialog: false,
             show_update_dialog: false,
+            show_create_tag_dialog: false,
+            new_tag_name: String::new(),
+            show_save_stash_dialog: false,
+            new_stash_message: String::new(),
         };
 
         app.restore_active_repo_from_state();
@@ -1548,6 +1556,108 @@ impl eframe::App for PalimpsestApp {
                 self.persist_session();
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            titlebar::OpenAction::NextTab => {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let next_index = (index + 1) % state.open_tabs.len();
+                        self.activate_tab(next_index);
+                    }
+                }
+            }
+            titlebar::OpenAction::PrevTab => {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let prev_index =
+                            (index + state.open_tabs.len() - 1) % state.open_tabs.len();
+                        self.activate_tab(prev_index);
+                    }
+                }
+            }
+            titlebar::OpenAction::Refresh => {
+                self.refresh_git_data();
+                self.refresh_github_remote_data(ui.ctx().clone());
+            }
+            titlebar::OpenAction::Fetch => {
+                let ctx = ui.ctx().clone();
+                self.handle_quick_launch_action(QuickLaunchAction::Fetch, &ctx);
+            }
+            titlebar::OpenAction::Pull => {
+                let ctx = ui.ctx().clone();
+                self.handle_quick_launch_action(QuickLaunchAction::Pull, &ctx);
+            }
+            titlebar::OpenAction::Push => {
+                let ctx = ui.ctx().clone();
+                self.handle_quick_launch_action(QuickLaunchAction::Push, &ctx);
+            }
+            titlebar::OpenAction::SaveStash => {
+                self.show_save_stash_dialog = true;
+                self.new_stash_message.clear();
+            }
+            titlebar::OpenAction::NewBranch => {
+                let ctx = ui.ctx().clone();
+                self.handle_quick_launch_action(QuickLaunchAction::CreateBranch, &ctx);
+            }
+            titlebar::OpenAction::NewTag => {
+                self.show_create_tag_dialog = true;
+                self.new_tag_name.clear();
+            }
+            titlebar::OpenAction::NewWorktree => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "New Worktree functionality coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::GitFlow => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Git Flow integration coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::GitLfs => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Git LFS integration coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::ApplyPatch => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Apply Patch functionality coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::Bisect => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Bisect functionality coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::OpenInFileExplorer => {
+                if let Some(path) = self.store.get_state().current_repo.clone() {
+                    open_url(&path);
+                }
+            }
+            titlebar::OpenAction::OpenInConsole => {
+                if let Some(path) = self.store.get_state().current_repo.clone() {
+                    self.open_in_console(&path);
+                }
+            }
+            titlebar::OpenAction::RepositoryStatistics => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Repository Statistics coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::RepositoryTreemap => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Repository Treemap coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::PerformanceBenchmark => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Performance Benchmark coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::RepositorySettings => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Repository Settings coming soon".to_string(),
+                )));
+            }
             titlebar::OpenAction::None => {}
         }
 
@@ -1660,6 +1770,31 @@ impl eframe::App for PalimpsestApp {
             let close_shortcut = egui::KeyboardShortcut::new(command, egui::Key::W);
             let prefs_shortcut = egui::KeyboardShortcut::new(command, egui::Key::Comma);
 
+            let refresh_shortcut =
+                egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F5);
+            let fetch_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::F);
+            let pull_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::L);
+            let push_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::P);
+            let save_stash_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::H);
+            let new_branch_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::B);
+            let new_tag_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::T);
+            let open_explorer_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::ALT), egui::Key::O);
+            let open_console_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::ALT), egui::Key::T);
+            let next_tab_shortcut =
+                egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Tab);
+            let prev_tab_shortcut = egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT),
+                egui::Key::Tab,
+            );
+
             if ctx.input_mut(|i| i.consume_shortcut(&open_shortcut)) {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     let path = path.to_string_lossy().to_string();
@@ -1709,6 +1844,66 @@ impl eframe::App for PalimpsestApp {
             }
             if ctx.input_mut(|i| i.consume_shortcut(&logs_shortcut)) {
                 self.debug_open = true;
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&next_tab_shortcut)) {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let next_index = (index + 1) % state.open_tabs.len();
+                        self.activate_tab(next_index);
+                    }
+                }
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&prev_tab_shortcut)) {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let prev_index =
+                            (index + state.open_tabs.len() - 1) % state.open_tabs.len();
+                        self.activate_tab(prev_index);
+                    }
+                }
+            }
+
+            if self.git_repo.is_some() {
+                if ctx.input_mut(|i| i.consume_shortcut(&refresh_shortcut)) {
+                    self.refresh_git_data();
+                    self.refresh_github_remote_data(ctx.clone());
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&fetch_shortcut)) {
+                    let ctx_cloned = ctx.clone();
+                    self.handle_quick_launch_action(QuickLaunchAction::Fetch, &ctx_cloned);
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&pull_shortcut)) {
+                    let ctx_cloned = ctx.clone();
+                    self.handle_quick_launch_action(QuickLaunchAction::Pull, &ctx_cloned);
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&push_shortcut)) {
+                    let ctx_cloned = ctx.clone();
+                    self.handle_quick_launch_action(QuickLaunchAction::Push, &ctx_cloned);
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&save_stash_shortcut)) {
+                    self.show_save_stash_dialog = true;
+                    self.new_stash_message.clear();
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&new_branch_shortcut)) {
+                    let ctx_cloned = ctx.clone();
+                    self.handle_quick_launch_action(QuickLaunchAction::CreateBranch, &ctx_cloned);
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&new_tag_shortcut)) {
+                    self.show_create_tag_dialog = true;
+                    self.new_tag_name.clear();
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&open_explorer_shortcut)) {
+                    if let Some(path) = self.store.get_state().current_repo.clone() {
+                        open_url(&path);
+                    }
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&open_console_shortcut)) {
+                    if let Some(path) = self.store.get_state().current_repo.clone() {
+                        self.open_in_console(&path);
+                    }
+                }
             }
         }
 
@@ -1852,6 +2047,7 @@ impl eframe::App for PalimpsestApp {
                         &mut self.body_state,
                         &mut self.commit_panel_state,
                         &state,
+                        self.git_repo.as_ref(),
                     )
                 },
             );
@@ -2041,6 +2237,201 @@ impl eframe::App for PalimpsestApp {
             }
         }
 
+        if self.show_create_tag_dialog {
+            let mut close_dialog = false;
+            let mut create_tag = false;
+
+            let mut is_open = self.show_create_tag_dialog;
+            egui::Window::new("Create Tag")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(400.0)
+                .open(&mut is_open)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        // Left Column: Logo
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(80.0, 100.0),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.add_space(10.0);
+                                let logo =
+                                    egui::Image::new(egui::include_image!("assets/logo.svg"))
+                                        .fit_to_exact_size(egui::vec2(48.0, 48.0));
+                                ui.add(logo);
+                            },
+                        );
+
+                        // Right Column: Form contents
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(280.0, 100.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.label(egui::RichText::new("Tag Name:").size(12.0));
+                                let text_input = ui.add_sized(
+                                    [ui.available_width(), 26.0],
+                                    egui::TextEdit::singleline(&mut self.new_tag_name)
+                                        .hint_text("v1.0.0")
+                                        .margin(egui::Margin::symmetric(8, 6)),
+                                );
+                                text_input.request_focus();
+
+                                if text_input.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    create_tag = true;
+                                }
+
+                                ui.add_space(12.0);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let create_btn = ui.add_enabled(
+                                            !self.new_tag_name.trim().is_empty(),
+                                            egui::Button::new("Create"),
+                                        );
+                                        if create_btn.clicked() {
+                                            create_tag = true;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            close_dialog = true;
+                                        }
+                                    },
+                                );
+                            },
+                        );
+                    });
+
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close_dialog = true;
+                    }
+                });
+
+            if create_tag {
+                let name = self.new_tag_name.trim().to_string();
+                if !name.is_empty() {
+                    if let Some(repo) = &self.git_repo {
+                        match repo.tag_lightweight(&name) {
+                            Ok(_) => {
+                                self.refresh_git_data();
+                            }
+                            Err(e) => {
+                                self.store.dispatch(AppAction::SetRepoError(Some(format!(
+                                    "Failed to create tag: {}",
+                                    e
+                                ))));
+                            }
+                        }
+                    }
+                }
+                close_dialog = true;
+            }
+
+            if !is_open || close_dialog {
+                self.show_create_tag_dialog = false;
+                self.new_tag_name.clear();
+            }
+        }
+
+        if self.show_save_stash_dialog {
+            let mut close_dialog = false;
+            let mut save_stash = false;
+
+            let mut is_open = self.show_save_stash_dialog;
+            egui::Window::new("Save Stash")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(400.0)
+                .open(&mut is_open)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        // Left Column: Logo
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(80.0, 100.0),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.add_space(10.0);
+                                let logo =
+                                    egui::Image::new(egui::include_image!("assets/logo.svg"))
+                                        .fit_to_exact_size(egui::vec2(48.0, 48.0));
+                                ui.add(logo);
+                            },
+                        );
+
+                        // Right Column: Form contents
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(280.0, 100.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new("Stash Message (Optional):").size(12.0),
+                                );
+                                let text_input = ui.add_sized(
+                                    [ui.available_width(), 26.0],
+                                    egui::TextEdit::singleline(&mut self.new_stash_message)
+                                        .hint_text("WIP on stash")
+                                        .margin(egui::Margin::symmetric(8, 6)),
+                                );
+                                text_input.request_focus();
+
+                                if text_input.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    save_stash = true;
+                                }
+
+                                ui.add_space(12.0);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("Save").clicked() {
+                                            save_stash = true;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            close_dialog = true;
+                                        }
+                                    },
+                                );
+                            },
+                        );
+                    });
+
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close_dialog = true;
+                    }
+                });
+
+            if save_stash {
+                let message = self.new_stash_message.trim().to_string();
+                let msg_opt = if message.is_empty() {
+                    None
+                } else {
+                    Some(message)
+                };
+                if let Some(repo) = &self.git_repo {
+                    match repo.stash_save(msg_opt.as_deref()) {
+                        Ok(_) => {
+                            self.refresh_git_data();
+                        }
+                        Err(e) => {
+                            self.store.dispatch(AppAction::SetRepoError(Some(format!(
+                                "Failed to save stash: {}",
+                                e
+                            ))));
+                        }
+                    }
+                }
+                close_dialog = true;
+            }
+
+            if !is_open || close_dialog {
+                self.show_save_stash_dialog = false;
+                self.new_stash_message.clear();
+            }
+        }
+
         if self.show_preferences_dialog {
             let mut close_dialog = false;
 
@@ -2133,6 +2524,36 @@ impl Drop for PalimpsestApp {
 }
 
 impl PalimpsestApp {
+    fn open_in_console(&self, path: &str) {
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open")
+            .args(["-a", "Terminal", path])
+            .spawn();
+
+        #[cfg(target_os = "windows")]
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", "cmd"])
+            .current_dir(path)
+            .spawn();
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            if std::process::Command::new("x-terminal-emulator")
+                .current_dir(path)
+                .spawn()
+                .is_err()
+                && std::process::Command::new("gnome-terminal")
+                    .arg(format!("--working-directory={}", path))
+                    .spawn()
+                    .is_err()
+            {
+                let _ = std::process::Command::new("xterm")
+                    .current_dir(path)
+                    .spawn();
+            }
+        }
+    }
+
     fn refresh_github_remote_data(&self, ctx: egui::Context) {
         let state = self.store.get_state();
         if state.github_loading {

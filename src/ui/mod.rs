@@ -1,5 +1,6 @@
 pub mod body;
 pub mod command_palette;
+pub mod commit_drawer;
 pub mod commit_panel;
 pub mod profile_panel;
 pub mod repo_manager;

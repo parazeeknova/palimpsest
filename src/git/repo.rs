@@ -111,6 +111,69 @@ impl GitRepo {
         Ok((count, oldest_commit))
     }
 
+    pub fn commit_by_hash(&self, hash: &str) -> Result<Commit, GitError> {
+        let oid = self.repo.revparse_single(hash)?.id();
+        let commit = self.repo.find_commit(oid)?;
+        Ok(self.commit_from_git2(&commit))
+    }
+
+    pub fn commit_files(&self, hash: &str) -> Result<Vec<FileStatus>, GitError> {
+        let commit = self.repo.revparse_single(hash)?.peel_to_commit()?;
+        let tree = commit.tree()?;
+        let parent_tree = commit
+            .parents()
+            .next()
+            .and_then(|parent| parent.tree().ok());
+
+        let mut diff_opts = git2::DiffOptions::new();
+        let diff = match parent_tree {
+            Some(parent_tree) => self.repo.diff_tree_to_tree(
+                Some(&parent_tree),
+                Some(&tree),
+                Some(&mut diff_opts),
+            )?,
+            None => self
+                .repo
+                .diff_tree_to_tree(None, Some(&tree), Some(&mut diff_opts))?,
+        };
+
+        let mut files = Vec::new();
+        diff.print(git2::DiffFormat::NameStatus, |delta, _hunk, _line| {
+            let path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let old_path = delta
+                .old_file()
+                .path()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string());
+
+            let kind = match delta.status() {
+                git2::Delta::Added => FileChangeKind::Added,
+                git2::Delta::Deleted => FileChangeKind::Deleted,
+                git2::Delta::Renamed => FileChangeKind::Renamed,
+                git2::Delta::Typechange => FileChangeKind::TypeChanged,
+                _ => FileChangeKind::Modified,
+            };
+
+            files.push(FileStatus {
+                path,
+                old_path,
+                kind,
+                staged: true,
+                additions: 0,
+                deletions: 0,
+            });
+            true
+        })?;
+
+        Ok(files)
+    }
+
     pub fn branches(&self) -> Result<Vec<Branch>, GitError> {
         let head_name = self.head_branch().ok();
 
@@ -843,6 +906,14 @@ impl GitRepo {
         let head = self.repo.head()?;
         let target = head.peel_to_commit()?;
         self.repo.branch(name, &target, false)?;
+        Ok(())
+    }
+
+    pub fn tag_lightweight(&self, name: &str) -> Result<(), GitError> {
+        let head = self.repo.head()?;
+        let commit = head.peel_to_commit()?;
+        self.repo
+            .tag_lightweight(name, &commit.into_object(), false)?;
         Ok(())
     }
 

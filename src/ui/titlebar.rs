@@ -1,8 +1,10 @@
 use eframe::egui;
 use egui_phosphor::regular::{
-    ARROW_CLOCKWISE, ARROW_LEFT, ARROW_RIGHT, ARROW_UP_RIGHT, CLOCK, CLOUD_ARROW_DOWN, FOLDER,
-    FOLDER_OPEN, FOLDER_PLUS, GEAR_SIX, GITHUB_LOGO, GLOBE_SIMPLE, KEY, MAGNIFYING_GLASS, MINUS,
-    PLUS, POWER, SQUARE, TERMINAL_WINDOW, USER_CIRCLE, X,
+    ARROW_CLOCKWISE, ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, ARROW_UP_RIGHT, BROWSERS,
+    CHART_BAR, CLOCK, CLOUD_ARROW_DOWN, DATABASE, FOLDER, FOLDER_OPEN, FOLDER_PLUS, GEAR_SIX,
+    GIT_BRANCH, GIT_FORK, GIT_PULL_REQUEST, GITHUB_LOGO, GLOBE_SIMPLE, GRID_FOUR, KEY,
+    MAGNIFYING_GLASS, MINUS, PLUS, POWER, SCISSORS, SQUARE, STACK, TAG, TERMINAL_WINDOW, TIMER,
+    USER_CIRCLE, WRENCH, X,
 };
 
 fn open_url(url: &str) {
@@ -30,6 +32,26 @@ pub enum OpenAction {
     CheckUpdates,
     Preferences,
     Exit,
+    Refresh,
+    Fetch,
+    Pull,
+    Push,
+    SaveStash,
+    NewBranch,
+    NewTag,
+    NewWorktree,
+    GitFlow,
+    GitLfs,
+    ApplyPatch,
+    Bisect,
+    OpenInFileExplorer,
+    OpenInConsole,
+    RepositoryStatistics,
+    RepositoryTreemap,
+    PerformanceBenchmark,
+    RepositorySettings,
+    NextTab,
+    PrevTab,
 }
 
 use crate::state::RecentRepo;
@@ -307,6 +329,367 @@ pub fn show(
                     );
                 }
 
+                if repo_name.is_some() {
+                    let repo_resp =
+                        ui.menu_button(egui::RichText::new("Repository").size(12.0), |ui| {
+                            ui.set_max_width(260.0);
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  Refresh",
+                                            ARROW_CLOCKWISE
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .shortcut_text("F5")
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::Refresh;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{}  Fetch...", ARROW_DOWN))
+                                            .size(12.0),
+                                    )
+                                    .shortcut_text("Ctrl+Shift+F")
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::Fetch;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  Pull...",
+                                            GIT_PULL_REQUEST
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .shortcut_text("Ctrl+Shift+L")
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::Pull;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{}  Push...", ARROW_UP))
+                                            .size(12.0),
+                                    )
+                                    .shortcut_text("Ctrl+Shift+P")
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::Push;
+                                ui.close();
+                            }
+
+                            ui.separator();
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{}  Save Stash...", STACK))
+                                            .size(12.0),
+                                    )
+                                    .shortcut_text("Ctrl+Shift+H")
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::SaveStash;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  New Branch...",
+                                            GIT_BRANCH
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .shortcut_text("Ctrl+Shift+B")
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::NewBranch;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{}  New Tag...", TAG))
+                                            .size(12.0),
+                                    )
+                                    .shortcut_text("Ctrl+Shift+T")
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::NewTag;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  New Worktree...",
+                                            BROWSERS
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::NewWorktree;
+                                ui.close();
+                            }
+
+                            ui.separator();
+
+                            ui.menu_button(
+                                egui::RichText::new(format!("{}  Git Flow", GIT_FORK)).size(12.0),
+                                |ui| {
+                                    ui.set_max_width(120.0);
+                                    if ui
+                                        .button(egui::RichText::new("Initialize").size(12.0))
+                                        .clicked()
+                                    {
+                                        action = OpenAction::GitFlow;
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .button(egui::RichText::new("Feature").size(12.0))
+                                        .clicked()
+                                    {
+                                        action = OpenAction::GitFlow;
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .button(egui::RichText::new("Release").size(12.0))
+                                        .clicked()
+                                    {
+                                        action = OpenAction::GitFlow;
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .button(egui::RichText::new("Hotfix").size(12.0))
+                                        .clicked()
+                                    {
+                                        action = OpenAction::GitFlow;
+                                        ui.close();
+                                    }
+                                },
+                            );
+
+                            ui.menu_button(
+                                egui::RichText::new(format!("{}  Git LFS", DATABASE)).size(12.0),
+                                |ui| {
+                                    ui.set_max_width(160.0);
+                                    if ui
+                                        .button(egui::RichText::new("Track...").size(12.0))
+                                        .clicked()
+                                    {
+                                        action = OpenAction::GitLfs;
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .button(egui::RichText::new("Untrack...").size(12.0))
+                                        .clicked()
+                                    {
+                                        action = OpenAction::GitLfs;
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .button(
+                                            egui::RichText::new("List Tracked Files").size(12.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        action = OpenAction::GitLfs;
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .button(egui::RichText::new("Status").size(12.0))
+                                        .clicked()
+                                    {
+                                        action = OpenAction::GitLfs;
+                                        ui.close();
+                                    }
+                                },
+                            );
+
+                            ui.separator();
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{}  Apply Patch...", WRENCH))
+                                            .size(12.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::ApplyPatch;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{}  Bisect", SCISSORS))
+                                            .size(12.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::Bisect;
+                                ui.close();
+                            }
+
+                            ui.separator();
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  Open In File Explorer",
+                                            FOLDER
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .shortcut_text("Ctrl+Alt+O")
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::OpenInFileExplorer;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  Open In Console",
+                                            TERMINAL_WINDOW
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .shortcut_text("Ctrl+Alt+T")
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::OpenInConsole;
+                                ui.close();
+                            }
+
+                            ui.separator();
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  Repository Statistics...",
+                                            CHART_BAR
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::RepositoryStatistics;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  Repository Treemap...",
+                                            GRID_FOUR
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::RepositoryTreemap;
+                                ui.close();
+                            }
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  Performance Benchmark...",
+                                            TIMER
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::PerformanceBenchmark;
+                                ui.close();
+                            }
+
+                            ui.separator();
+
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new(format!(
+                                            "{}  Settings for This Repository...",
+                                            GEAR_SIX
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                action = OpenAction::RepositorySettings;
+                                ui.close();
+                            }
+                        });
+                    if repo_resp.response.hovered() || repo_resp.inner.is_some() {
+                        ui.painter().rect_filled(
+                            repo_resp.response.rect,
+                            2.0,
+                            egui::Color32::from_white_alpha(30),
+                        );
+                    }
+                }
+
                 let view_resp = ui.menu_button(egui::RichText::new("View").size(12.0), |ui| {
                     ui.set_max_width(300.0);
 
@@ -347,7 +730,39 @@ pub fn show(
                 }
 
                 let window_resp = ui.menu_button(egui::RichText::new("Window").size(12.0), |ui| {
-                    ui.set_max_width(200.0);
+                    ui.set_max_width(220.0);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("{}  Select Next Tab", ARROW_RIGHT))
+                                    .size(12.0),
+                            )
+                            .shortcut_text("Ctrl+Tab")
+                            .frame(false),
+                        )
+                        .clicked()
+                    {
+                        action = OpenAction::NextTab;
+                        ui.close();
+                    }
+
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("{}  Select Previous Tab", ARROW_LEFT))
+                                    .size(12.0),
+                            )
+                            .shortcut_text("Ctrl+Shift+Tab")
+                            .frame(false),
+                        )
+                        .clicked()
+                    {
+                        action = OpenAction::PrevTab;
+                        ui.close();
+                    }
+
+                    ui.separator();
+
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(TERMINAL_WINDOW).size(12.0));
                         ui.label("Show window buttons");
