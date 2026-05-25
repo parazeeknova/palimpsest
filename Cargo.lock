@@ -3651,7 +3651,7 @@ dependencies = [
 
 [[package]]
 name = "palimpsest"
-version = "0.0.87"
+version = "0.0.90"
 dependencies = [
  "aes",
  "aes-gcm",

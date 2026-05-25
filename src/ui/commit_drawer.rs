@@ -7,11 +7,11 @@ use std::collections::BTreeMap;
 use crate::git::models::{FileChangeKind, FileStatus};
 use crate::state::AppState;
 
-const TREE_ROW_HEIGHT: f32 = 22.0;
+const TREE_ROW_HEIGHT: f32 = 20.0;
 const TREE_SLOT_WIDTH: f32 = 22.0;
 const TREE_LEFT_PADDING: f32 = 6.0;
 const TREE_CARET_SLOT: f32 = 6.0;
-const TREE_ICON_GAP: f32 = 18.0;
+const TREE_ICON_GAP: f32 = 24.0;
 
 #[derive(Clone, Debug)]
 pub struct CommitDrawerCommit {
@@ -402,7 +402,7 @@ fn paint_tree_entry(
     ancestors_last: &mut Vec<bool>,
     is_last: bool,
     muted: egui::Color32,
-) {
+) -> f32 {
     let row_height = TREE_ROW_HEIGHT;
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), row_height),
@@ -464,29 +464,37 @@ fn paint_tree_entry(
     );
 
     ui.painter().text(
-        egui::pos2(icon_x + 16.0, center_y),
+        egui::pos2(icon_x + 10.0, center_y),
         egui::Align2::LEFT_CENTER,
         &entry.label,
         egui::FontId::proportional(10.0),
         ui.visuals().text_color(),
     );
 
-    if matches!(entry.kind, TreeEntryKind::Directory) && entry.expanded {
-        if !entry.children.is_empty() {
-            let guide_x = slot_left + TREE_CARET_SLOT;
-            ui.painter().line_segment(
-                [
-                    egui::pos2(guide_x, rect.bottom() - 2.0),
-                    egui::pos2(guide_x, rect.bottom() + 10.0),
-                ],
-                egui::Stroke::new(1.0_f32, muted.linear_multiply(0.35)),
-            );
-        }
+    if let Some(kind) = entry.file_kind.as_ref() {
+        let (status_label, status_color) = file_status_label(kind.clone());
+        ui.painter().text(
+            egui::pos2(rect.right() - 12.0, center_y),
+            egui::Align2::RIGHT_CENTER,
+            status_label,
+            egui::FontId::proportional(9.0),
+            status_color,
+        );
+    }
+
+    let mut subtree_height = row_height;
+
+    if matches!(entry.kind, TreeEntryKind::Directory)
+        && entry.expanded
+        && !entry.children.is_empty()
+    {
+        let guide_x = slot_left + TREE_CARET_SLOT;
+        let mut child_bottom = rect.bottom();
 
         ancestors_last.push(is_last);
         let child_len = entry.children.len();
         for (index, child) in entry.children.iter_mut().enumerate() {
-            paint_tree_entry(
+            let child_height = paint_tree_entry(
                 ui,
                 child,
                 depth + 1,
@@ -494,9 +502,21 @@ fn paint_tree_entry(
                 index + 1 == child_len,
                 muted,
             );
+            child_bottom += child_height;
+            subtree_height += child_height;
         }
         ancestors_last.pop();
+
+        ui.painter().line_segment(
+            [
+                egui::pos2(guide_x, rect.bottom() - 2.0),
+                egui::pos2(guide_x, child_bottom - 1.0),
+            ],
+            egui::Stroke::new(1.0_f32, muted.linear_multiply(0.35)),
+        );
     }
+
+    subtree_height
 }
 
 fn paint_tree_guides(
@@ -567,6 +587,16 @@ fn file_icon_color(file_kind: Option<&FileChangeKind>) -> egui::Color32 {
         Some(FileChangeKind::Renamed) => egui::Color32::from_rgb(172, 172, 172),
         Some(FileChangeKind::TypeChanged) => egui::Color32::from_rgb(172, 172, 172),
         Some(FileChangeKind::Modified) | None => egui::Color32::from_rgb(252, 197, 34),
+    }
+}
+
+fn file_status_label(kind: FileChangeKind) -> (&'static str, egui::Color32) {
+    match kind {
+        FileChangeKind::Added => ("A", egui::Color32::from_rgb(78, 190, 116)),
+        FileChangeKind::Modified => ("M", egui::Color32::from_rgb(252, 197, 34)),
+        FileChangeKind::Deleted => ("D", egui::Color32::from_rgb(228, 86, 86)),
+        FileChangeKind::Renamed => ("R", egui::Color32::from_rgb(172, 172, 172)),
+        FileChangeKind::TypeChanged => ("T", egui::Color32::from_rgb(172, 172, 172)),
     }
 }
 
