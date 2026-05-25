@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct BoundedLocalSnapshot {
@@ -136,9 +136,9 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
         .optional()?
         .flatten();
 
-    let next_version = current_version.unwrap_or(0) + 1;
+    let current_version = current_version.unwrap_or(0);
 
-    if next_version <= 1 {
+    if current_version < 1 {
         let tx = conn.unchecked_transaction()?;
         tx.execute(
             "CREATE TABLE IF NOT EXISTS repos(
@@ -276,6 +276,30 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
         tx.commit()?;
     }
 
+    if current_version < 2 {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DROP TABLE IF EXISTS github_cache", [])?;
+        tx.execute(
+            "CREATE TABLE github_cache(
+                repo_id INTEGER,
+                auth_login TEXT NOT NULL,
+                endpoint TEXT,
+                etag TEXT,
+                fetched_at INTEGER,
+                error TEXT,
+                payload_json TEXT,
+                PRIMARY KEY(repo_id, auth_login, endpoint),
+                FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (2, ?)",
+            [now_millis() as i64],
+        )?;
+        tx.commit()?;
+    }
+
     Ok(())
 }
 
@@ -349,7 +373,7 @@ fn parse_kind(s: &str) -> FileChangeKind {
     }
 }
 
-pub fn save_cache(cache: &DiskCache) -> Result<(), String> {
+pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), String> {
     let mut conn = open_conn()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
@@ -520,65 +544,72 @@ pub fn save_cache(cache: &DiskCache) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
 
-    // Save GitHub cache if present in remote_snapshot
-    if let Some(ref remote) = cache.remote_snapshot {
-        save_github_cache_data(
-            &tx,
-            repo_id,
-            "prs",
-            cache.prs_etag.as_deref(),
-            remote.last_refresh.unwrap_or(0),
-            remote.github_error.as_deref(),
-            &serde_json::to_string(&remote.pull_requests).unwrap_or_else(|_| "[]".to_string()),
-        )?;
-        save_github_cache_data(
-            &tx,
-            repo_id,
-            "actions",
-            cache.actions_etag.as_deref(),
-            remote.last_refresh.unwrap_or(0),
-            remote.github_error.as_deref(),
-            &serde_json::to_string(&remote.action_runs).unwrap_or_else(|_| "[]".to_string()),
-        )?;
-        save_github_cache_data(
-            &tx,
-            repo_id,
-            "releases",
-            cache.releases_etag.as_deref(),
-            remote.last_refresh.unwrap_or(0),
-            remote.github_error.as_deref(),
-            &serde_json::to_string(&remote.releases).unwrap_or_else(|_| "[]".to_string()),
-        )?;
+    // Save GitHub cache if present in remote_snapshot and auth_login is present
+    if let Some(login) = auth_login {
+        if let Some(ref remote) = cache.remote_snapshot {
+            save_github_cache_data(
+                &tx,
+                repo_id,
+                login,
+                "prs",
+                cache.prs_etag.as_deref(),
+                remote.last_refresh.unwrap_or(0),
+                remote.github_error.as_deref(),
+                &serde_json::to_string(&remote.pull_requests).unwrap_or_else(|_| "[]".to_string()),
+            )?;
+            save_github_cache_data(
+                &tx,
+                repo_id,
+                login,
+                "actions",
+                cache.actions_etag.as_deref(),
+                remote.last_refresh.unwrap_or(0),
+                remote.github_error.as_deref(),
+                &serde_json::to_string(&remote.action_runs).unwrap_or_else(|_| "[]".to_string()),
+            )?;
+            save_github_cache_data(
+                &tx,
+                repo_id,
+                login,
+                "releases",
+                cache.releases_etag.as_deref(),
+                remote.last_refresh.unwrap_or(0),
+                remote.github_error.as_deref(),
+                &serde_json::to_string(&remote.releases).unwrap_or_else(|_| "[]".to_string()),
+            )?;
 
-        let containers: Vec<&GitHubPackage> = remote
-            .packages
-            .iter()
-            .filter(|p| p.package_type == "container")
-            .collect();
-        save_github_cache_data(
-            &tx,
-            repo_id,
-            "packages_container",
-            cache.packages_container_etag.as_deref(),
-            remote.last_refresh.unwrap_or(0),
-            remote.github_error.as_deref(),
-            &serde_json::to_string(&containers).unwrap_or_else(|_| "[]".to_string()),
-        )?;
+            let containers: Vec<&GitHubPackage> = remote
+                .packages
+                .iter()
+                .filter(|p| p.package_type == "container")
+                .collect();
+            save_github_cache_data(
+                &tx,
+                repo_id,
+                login,
+                "packages_container",
+                cache.packages_container_etag.as_deref(),
+                remote.last_refresh.unwrap_or(0),
+                remote.github_error.as_deref(),
+                &serde_json::to_string(&containers).unwrap_or_else(|_| "[]".to_string()),
+            )?;
 
-        let npms: Vec<&GitHubPackage> = remote
-            .packages
-            .iter()
-            .filter(|p| p.package_type == "npm")
-            .collect();
-        save_github_cache_data(
-            &tx,
-            repo_id,
-            "packages_npm",
-            cache.packages_npm_etag.as_deref(),
-            remote.last_refresh.unwrap_or(0),
-            remote.github_error.as_deref(),
-            &serde_json::to_string(&npms).unwrap_or_else(|_| "[]".to_string()),
-        )?;
+            let npms: Vec<&GitHubPackage> = remote
+                .packages
+                .iter()
+                .filter(|p| p.package_type == "npm")
+                .collect();
+            save_github_cache_data(
+                &tx,
+                repo_id,
+                login,
+                "packages_npm",
+                cache.packages_npm_etag.as_deref(),
+                remote.last_refresh.unwrap_or(0),
+                remote.github_error.as_deref(),
+                &serde_json::to_string(&npms).unwrap_or_else(|_| "[]".to_string()),
+            )?;
+        }
     }
 
     if let Err(e) = evict_old_repos(&tx, 20) {
@@ -590,9 +621,293 @@ pub fn save_cache(cache: &DiskCache) -> Result<(), String> {
     Ok(())
 }
 
+fn save_fingerprints_in_tx(
+    tx: &Transaction,
+    repo_id: i64,
+    fps: &RepoFingerprints,
+    now: i64,
+) -> Result<(), String> {
+    tx.execute(
+        "INSERT OR REPLACE INTO repo_fingerprints (repo_id, head, index_fp, refs_heads, refs_remotes, refs_tags, packed_refs, config, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            repo_id,
+            &fps.head,
+            &fps.index,
+            &fps.refs_heads,
+            &fps.refs_remotes,
+            &fps.refs_tags,
+            &fps.packed_refs,
+            &fps.config,
+            now,
+        ),
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn save_status_slice(
+    repo_path: &str,
+    status: &RepoStatus,
+    fps: &RepoFingerprints,
+) -> Result<(), String> {
+    let mut conn = open_conn()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
+    let now = now_millis() as i64;
+
+    tx.execute(
+        "UPDATE repos SET last_seen = ? WHERE id = ?",
+        [now, repo_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute(
+        "INSERT OR REPLACE INTO repo_status (repo_id, branch, staged_count, unstaged_count, additions, deletions, files_changed, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            repo_id,
+            &status.branch,
+            status.staged_count as i64,
+            status.unstaged_count as i64,
+            status.additions as i64,
+            status.deletions as i64,
+            status.files_changed as i64,
+            now,
+        ),
+    ).map_err(|e| e.to_string())?;
+
+    tx.execute("DELETE FROM repo_status_files WHERE repo_id = ?", [repo_id])
+        .map_err(|e| e.to_string())?;
+    for f in &status.staged_files {
+        tx.execute(
+            "INSERT OR REPLACE INTO repo_status_files (repo_id, path, old_path, kind, staged, additions, deletions)
+             VALUES (?, ?, ?, ?, 1, ?, ?)",
+            (
+                repo_id,
+                &f.path,
+                &f.old_path,
+                format_kind(&f.kind),
+                f.additions as i64,
+                f.deletions as i64,
+            ),
+        ).map_err(|e| e.to_string())?;
+    }
+    for f in &status.unstaged_files {
+        tx.execute(
+            "INSERT OR REPLACE INTO repo_status_files (repo_id, path, old_path, kind, staged, additions, deletions)
+             VALUES (?, ?, ?, ?, 0, ?, ?)",
+            (
+                repo_id,
+                &f.path,
+                &f.old_path,
+                format_kind(&f.kind),
+                f.additions as i64,
+                f.deletions as i64,
+            ),
+        ).map_err(|e| e.to_string())?;
+    }
+
+    save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn save_commits_slice(
+    repo_path: &str,
+    commits: &[Commit],
+    fps: &RepoFingerprints,
+) -> Result<(), String> {
+    let mut conn = open_conn()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
+    let now = now_millis() as i64;
+
+    tx.execute(
+        "UPDATE repos SET last_seen = ? WHERE id = ?",
+        [now, repo_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute("DELETE FROM commits WHERE repo_id = ?", [repo_id])
+        .map_err(|e| e.to_string())?;
+    for (i, c) in commits.iter().take(200).enumerate() {
+        let parents_json = serde_json::to_string(&c.parents).unwrap_or_else(|_| "[]".to_string());
+        let c_time = c
+            .timestamp
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0) as i64;
+        tx.execute(
+            "INSERT INTO commits (repo_id, hash, short_hash, message, author, email, timestamp, parents_json, ordinal)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                repo_id,
+                &c.hash,
+                &c.short_hash,
+                &c.message,
+                &c.author,
+                &c.email,
+                c_time,
+                &parents_json,
+                i as i64,
+            ),
+        ).map_err(|e| e.to_string())?;
+    }
+
+    save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn save_refs_slice(
+    repo_path: &str,
+    branches: &[Branch],
+    fps: &RepoFingerprints,
+) -> Result<(), String> {
+    let mut conn = open_conn()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
+    let now = now_millis() as i64;
+
+    tx.execute(
+        "UPDATE repos SET last_seen = ? WHERE id = ?",
+        [now, repo_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute("DELETE FROM branches WHERE repo_id = ?", [repo_id])
+        .map_err(|e| e.to_string())?;
+    for b in branches {
+        tx.execute(
+            "INSERT INTO branches (repo_id, name, is_current, is_remote, upstream, tip_hash)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                repo_id,
+                &b.name,
+                if b.is_current { 1 } else { 0 },
+                if b.is_remote { 1 } else { 0 },
+                &b.upstream,
+                &b.tip_hash,
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn save_remotes_slice(
+    repo_path: &str,
+    remotes: &[Remote],
+    fps: &RepoFingerprints,
+) -> Result<(), String> {
+    let mut conn = open_conn()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
+    let now = now_millis() as i64;
+
+    tx.execute(
+        "UPDATE repos SET last_seen = ? WHERE id = ?",
+        [now, repo_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute("DELETE FROM remotes WHERE repo_id = ?", [repo_id])
+        .map_err(|e| e.to_string())?;
+    for r in remotes {
+        tx.execute(
+            "INSERT INTO remotes (repo_id, name, url) VALUES (?, ?, ?)",
+            (repo_id, &r.name, &r.url),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn save_tags_slice(
+    repo_path: &str,
+    tags: &[Tag],
+    fps: &RepoFingerprints,
+) -> Result<(), String> {
+    let mut conn = open_conn()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
+    let now = now_millis() as i64;
+
+    tx.execute(
+        "UPDATE repos SET last_seen = ? WHERE id = ?",
+        [now, repo_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute("DELETE FROM tags WHERE repo_id = ?", [repo_id])
+        .map_err(|e| e.to_string())?;
+    for t in tags.iter().take(100) {
+        let t_time = t
+            .timestamp
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0) as i64;
+        tx.execute(
+            "INSERT INTO tags (repo_id, name, target_hash, author, timestamp)
+             VALUES (?, ?, ?, ?, ?)",
+            (repo_id, &t.name, &t.target_hash, &t.author, t_time),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn save_stashes_slice(
+    repo_path: &str,
+    stashes: &[Stash],
+    fps: &RepoFingerprints,
+) -> Result<(), String> {
+    let mut conn = open_conn()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
+    let now = now_millis() as i64;
+
+    tx.execute(
+        "UPDATE repos SET last_seen = ? WHERE id = ?",
+        [now, repo_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute("DELETE FROM stashes WHERE repo_id = ?", [repo_id])
+        .map_err(|e| e.to_string())?;
+    for (i, s) in stashes.iter().take(50).enumerate() {
+        let s_time = s
+            .timestamp
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0) as i64;
+        tx.execute(
+            "INSERT INTO stashes (repo_id, hash, message, timestamp, ordinal)
+             VALUES (?, ?, ?, ?, ?)",
+            (repo_id, &s.hash, &s.message, s_time, i as i64),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    save_fingerprints_in_tx(&tx, repo_id, fps, now)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn save_github_cache_data(
     tx: &Transaction,
     repo_id: i64,
+    auth_login: &str,
     endpoint: &str,
     etag: Option<&str>,
     fetched_at: u128,
@@ -600,10 +915,11 @@ fn save_github_cache_data(
     payload_json: &str,
 ) -> Result<(), String> {
     tx.execute(
-        "INSERT OR REPLACE INTO github_cache (repo_id, endpoint, etag, fetched_at, error, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO github_cache (repo_id, auth_login, endpoint, etag, fetched_at, error, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             repo_id,
+            auth_login,
             endpoint,
             etag,
             fetched_at as i64,
@@ -616,6 +932,7 @@ fn save_github_cache_data(
 
 pub fn save_github_cache_entry(
     repo_path: &str,
+    auth_login: &str,
     endpoint: &str,
     etag: Option<&str>,
     fetched_at: u128,
@@ -627,10 +944,11 @@ pub fn save_github_cache_entry(
     let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
 
     tx.execute(
-        "INSERT OR REPLACE INTO github_cache (repo_id, endpoint, etag, fetched_at, error, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO github_cache (repo_id, auth_login, endpoint, etag, fetched_at, error, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             repo_id,
+            auth_login,
             endpoint,
             etag,
             fetched_at as i64,
@@ -643,9 +961,37 @@ pub fn save_github_cache_entry(
     Ok(())
 }
 
+pub fn touch_github_cache_entry(
+    repo_path: &str,
+    auth_login: &str,
+    endpoint: &str,
+    fetched_at: u128,
+    clear_error: bool,
+) -> Result<(), String> {
+    let mut conn = open_conn()?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
+
+    if clear_error {
+        tx.execute(
+            "UPDATE github_cache SET fetched_at = ?, error = NULL WHERE repo_id = ? AND auth_login = ? AND endpoint = ?",
+            (fetched_at as i64, repo_id, auth_login, endpoint),
+        ).map_err(|e| e.to_string())?;
+    } else {
+        tx.execute(
+            "UPDATE github_cache SET fetched_at = ? WHERE repo_id = ? AND auth_login = ? AND endpoint = ?",
+            (fetched_at as i64, repo_id, auth_login, endpoint),
+        ).map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[allow(clippy::type_complexity)]
 pub fn load_github_cache_entry(
     repo_path: &str,
+    auth_login: &str,
     endpoint: &str,
 ) -> Result<Option<(Option<String>, u128, Option<String>, String)>, String> {
     let conn = open_conn()?;
@@ -662,8 +1008,8 @@ pub fn load_github_cache_entry(
 
     let row: Option<(Option<String>, i64, Option<String>, String)> = conn
         .query_row(
-            "SELECT etag, fetched_at, error, payload_json FROM github_cache WHERE repo_id = ? AND endpoint = ?",
-            (repo_id, endpoint),
+            "SELECT etag, fetched_at, error, payload_json FROM github_cache WHERE repo_id = ? AND auth_login = ? AND endpoint = ?",
+            (repo_id, auth_login, endpoint),
             |row| {
                 Ok((
                     row.get(0)?,
@@ -683,7 +1029,7 @@ pub fn load_github_cache_entry(
     }
 }
 
-pub fn load_cache(repo_path: &str) -> Option<DiskCache> {
+pub fn load_cache(repo_path: &str, auth_login: Option<&str>) -> Option<DiskCache> {
     let conn = match open_conn() {
         Ok(c) => c,
         Err(e) => {
@@ -959,76 +1305,80 @@ pub fn load_cache(repo_path: &str) -> Option<DiskCache> {
     let mut packages_container_etag = None;
     let mut packages_npm_etag = None;
 
-    if let Ok(Some((etag, fetched_at, err, payload))) = load_github_cache_entry(repo_path, "prs") {
-        prs_etag = etag;
-        if let Ok(data) = serde_json::from_str::<Vec<GitHubPullRequest>>(&payload) {
-            pull_requests = data;
+    if let Some(login) = auth_login {
+        if let Ok(Some((etag, fetched_at, err, payload))) =
+            load_github_cache_entry(repo_path, login, "prs")
+        {
+            prs_etag = etag;
+            if let Ok(data) = serde_json::from_str::<Vec<GitHubPullRequest>>(&payload) {
+                pull_requests = data;
+            }
+            if let Some(e) = err {
+                errors.push(format!("PRs: {e}"));
+            }
+            if fetched_at > max_fetched_at {
+                max_fetched_at = fetched_at;
+            }
         }
-        if let Some(e) = err {
-            errors.push(format!("PRs: {e}"));
-        }
-        if fetched_at > max_fetched_at {
-            max_fetched_at = fetched_at;
-        }
-    }
 
-    if let Ok(Some((etag, fetched_at, err, payload))) =
-        load_github_cache_entry(repo_path, "actions")
-    {
-        actions_etag = etag;
-        if let Ok(data) = serde_json::from_str::<Vec<GitHubActionRun>>(&payload) {
-            action_runs = data;
+        if let Ok(Some((etag, fetched_at, err, payload))) =
+            load_github_cache_entry(repo_path, login, "actions")
+        {
+            actions_etag = etag;
+            if let Ok(data) = serde_json::from_str::<Vec<GitHubActionRun>>(&payload) {
+                action_runs = data;
+            }
+            if let Some(e) = err {
+                errors.push(format!("Actions: {e}"));
+            }
+            if fetched_at > max_fetched_at {
+                max_fetched_at = fetched_at;
+            }
         }
-        if let Some(e) = err {
-            errors.push(format!("Actions: {e}"));
-        }
-        if fetched_at > max_fetched_at {
-            max_fetched_at = fetched_at;
-        }
-    }
 
-    if let Ok(Some((etag, fetched_at, err, payload))) =
-        load_github_cache_entry(repo_path, "releases")
-    {
-        releases_etag = etag;
-        if let Ok(data) = serde_json::from_str::<Vec<GitHubRelease>>(&payload) {
-            releases = data;
+        if let Ok(Some((etag, fetched_at, err, payload))) =
+            load_github_cache_entry(repo_path, login, "releases")
+        {
+            releases_etag = etag;
+            if let Ok(data) = serde_json::from_str::<Vec<GitHubRelease>>(&payload) {
+                releases = data;
+            }
+            if let Some(e) = err {
+                errors.push(format!("Releases: {e}"));
+            }
+            if fetched_at > max_fetched_at {
+                max_fetched_at = fetched_at;
+            }
         }
-        if let Some(e) = err {
-            errors.push(format!("Releases: {e}"));
-        }
-        if fetched_at > max_fetched_at {
-            max_fetched_at = fetched_at;
-        }
-    }
 
-    if let Ok(Some((etag, fetched_at, err, payload))) =
-        load_github_cache_entry(repo_path, "packages_container")
-    {
-        packages_container_etag = etag;
-        if let Ok(data) = serde_json::from_str::<Vec<GitHubPackage>>(&payload) {
-            packages.extend(data);
+        if let Ok(Some((etag, fetched_at, err, payload))) =
+            load_github_cache_entry(repo_path, login, "packages_container")
+        {
+            packages_container_etag = etag;
+            if let Ok(data) = serde_json::from_str::<Vec<GitHubPackage>>(&payload) {
+                packages.extend(data);
+            }
+            if let Some(e) = err {
+                errors.push(format!("Container Packages: {e}"));
+            }
+            if fetched_at > max_fetched_at {
+                max_fetched_at = fetched_at;
+            }
         }
-        if let Some(e) = err {
-            errors.push(format!("Container Packages: {e}"));
-        }
-        if fetched_at > max_fetched_at {
-            max_fetched_at = fetched_at;
-        }
-    }
 
-    if let Ok(Some((etag, fetched_at, err, payload))) =
-        load_github_cache_entry(repo_path, "packages_npm")
-    {
-        packages_npm_etag = etag;
-        if let Ok(data) = serde_json::from_str::<Vec<GitHubPackage>>(&payload) {
-            packages.extend(data);
-        }
-        if let Some(e) = err {
-            errors.push(format!("NPM Packages: {e}"));
-        }
-        if fetched_at > max_fetched_at {
-            max_fetched_at = fetched_at;
+        if let Ok(Some((etag, fetched_at, err, payload))) =
+            load_github_cache_entry(repo_path, login, "packages_npm")
+        {
+            packages_npm_etag = etag;
+            if let Ok(data) = serde_json::from_str::<Vec<GitHubPackage>>(&payload) {
+                packages.extend(data);
+            }
+            if let Some(e) = err {
+                errors.push(format!("NPM Packages: {e}"));
+            }
+            if fetched_at > max_fetched_at {
+                max_fetched_at = fetched_at;
+            }
         }
     }
 
@@ -1038,7 +1388,7 @@ pub fn load_cache(repo_path: &str) -> Option<DiskCache> {
         Some(errors.join(", "))
     };
 
-    let remote_snapshot = if max_fetched_at > 0 {
+    let remote_snapshot = if max_fetched_at > 0 && auth_login.is_some() {
         let repo_ownership = match ownership {
             Some(true) => RepoOwnership::Owned,
             Some(false) => RepoOwnership::External,
@@ -1459,13 +1809,9 @@ mod tests {
             packages_npm_etag: None,
         };
 
-        // Write to temp file environment DB
-        unsafe {
-            std::env::set_var("PALIMPSEST_DB_TEST", "1");
-        }
-        save_cache(&dc).unwrap();
+        save_cache(&dc, Some("user")).unwrap();
 
-        let loaded = load_cache(&path_str).unwrap();
+        let loaded = load_cache(&path_str, Some("user")).unwrap();
         assert_eq!(loaded.repo_path, path_str);
         assert_eq!(loaded.local_snapshot.commits.len(), 1);
         assert_eq!(
@@ -1511,6 +1857,7 @@ mod tests {
         // 1. Initial save
         save_github_cache_entry(
             &path_str,
+            "alice",
             "prs",
             Some("etag-initial"),
             1000,
@@ -1519,24 +1866,35 @@ mod tests {
         )
         .unwrap();
 
-        let (etag, fetched_at, error, payload) =
-            load_github_cache_entry(&path_str, "prs").unwrap().unwrap();
+        let (etag, fetched_at, error, payload) = load_github_cache_entry(&path_str, "alice", "prs")
+            .unwrap()
+            .unwrap();
         assert_eq!(etag.as_deref(), Some("etag-initial"));
         assert_eq!(fetched_at, 1000);
         assert_eq!(error, None);
         assert_eq!(payload, "[\"initial\"]");
 
         // 2. Mock 304 - update fetched_at but preserve old payload
-        save_github_cache_entry(&path_str, "prs", Some("etag-initial"), 2000, None, &payload)
+        save_github_cache_entry(
+            &path_str,
+            "alice",
+            "prs",
+            Some("etag-initial"),
+            2000,
+            None,
+            &payload,
+        )
+        .unwrap();
+        let (_, fetched_at, _, payload2) = load_github_cache_entry(&path_str, "alice", "prs")
+            .unwrap()
             .unwrap();
-        let (_, fetched_at, _, payload2) =
-            load_github_cache_entry(&path_str, "prs").unwrap().unwrap();
         assert_eq!(fetched_at, 2000);
         assert_eq!(payload2, "[\"initial\"]"); // payload remains identical
 
         // 3. Mock API error - store error separately while keeping last good payload
         save_github_cache_entry(
             &path_str,
+            "alice",
             "prs",
             Some("etag-initial"),
             3000,
@@ -1544,8 +1902,9 @@ mod tests {
             &payload2,
         )
         .unwrap();
-        let (_, fetched_at3, error3, payload3) =
-            load_github_cache_entry(&path_str, "prs").unwrap().unwrap();
+        let (_, fetched_at3, error3, payload3) = load_github_cache_entry(&path_str, "alice", "prs")
+            .unwrap()
+            .unwrap();
         assert_eq!(fetched_at3, 3000);
         assert_eq!(error3.as_deref(), Some("Rate Limit Exceeded"));
         assert_eq!(payload3, "[\"initial\"]"); // payload still preserved
@@ -1590,5 +1949,341 @@ mod tests {
             )
             .unwrap();
         assert_eq!(min_id_path, "/path/to/repo/5");
+    }
+
+    #[test]
+    fn test_github_cache_user_scoped() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "palimpsest_scope_test_{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_dir.join(".git")).unwrap();
+        let _guard = TestDbGuard::new(temp_dir.join("test.db"));
+        let path_str = temp_dir.to_str().unwrap().to_string();
+
+        let local = BoundedLocalSnapshot {
+            commits: vec![],
+            branches: vec![],
+            remotes: vec![],
+            tags: vec![],
+            stashes: vec![],
+            status: RepoStatus {
+                branch: "main".to_string(),
+                staged_count: 0,
+                unstaged_count: 0,
+                staged_files: vec![],
+                unstaged_files: vec![],
+                additions: 0,
+                deletions: 0,
+                files_changed: 0,
+            },
+            repo_error: None,
+            last_refresh: None,
+            ownership: Some(true),
+        };
+
+        // Create a cache structure with remote snapshot data
+        let dc = DiskCache {
+            schema_version: SCHEMA_VERSION,
+            repo_path: path_str.clone(),
+            repo_fingerprint: "dummy-fp".to_string(),
+            captured_at: 1000,
+            local_snapshot: local,
+            remote_snapshot: Some(RepoRemoteSnapshot {
+                pull_requests: vec![GitHubPullRequest {
+                    number: 42,
+                    title: "PR Alice".to_string(),
+                    state: "open".to_string(),
+                    user_login: "alice".to_string(),
+                    html_url: "url".to_string(),
+                    head_ref: "feature".to_string(),
+                    base_ref: "main".to_string(),
+                    draft: false,
+                }],
+                action_runs: vec![],
+                releases: vec![],
+                packages: vec![],
+                github_error: None,
+                last_refresh: Some(2000),
+                ownership: RepoOwnership::Owned,
+            }),
+            prs_etag: Some("etag-alice".to_string()),
+            actions_etag: None,
+            releases_etag: None,
+            packages_container_etag: None,
+            packages_npm_etag: None,
+        };
+
+        // 1. Save cache with user "alice"
+        save_cache(&dc, Some("alice")).unwrap();
+
+        // 2. Loading with "bob" should NOT load the remote snapshot, and should have prs_etag = None
+        let loaded_bob = load_cache(&path_str, Some("bob")).unwrap();
+        assert!(loaded_bob.remote_snapshot.is_none());
+        assert_eq!(loaded_bob.prs_etag, None);
+
+        // 3. Loading with None should NOT load the remote snapshot, and should have prs_etag = None
+        let loaded_none = load_cache(&path_str, None).unwrap();
+        assert!(loaded_none.remote_snapshot.is_none());
+        assert_eq!(loaded_none.prs_etag, None);
+
+        // 4. Loading with "alice" should load it successfully
+        let loaded_alice = load_cache(&path_str, Some("alice")).unwrap();
+        let remote = loaded_alice.remote_snapshot.unwrap();
+        assert_eq!(remote.pull_requests.len(), 1);
+        assert_eq!(remote.pull_requests[0].title, "PR Alice");
+        assert_eq!(loaded_alice.prs_etag.as_deref(), Some("etag-alice"));
+
+        // 5. Verify local cache is still loaded regardless of auth login (even with None or "bob")
+        assert_eq!(loaded_bob.local_snapshot.status.branch, "main");
+        assert_eq!(loaded_none.local_snapshot.status.branch, "main");
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_slice_specific_persistence() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "palimpsest_slice_test_{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_dir.join(".git")).unwrap();
+        let _guard = TestDbGuard::new(temp_dir.join("test.db"));
+        let path_str = temp_dir.to_str().unwrap().to_string();
+
+        let local = BoundedLocalSnapshot {
+            commits: vec![Commit {
+                hash: "c1".to_string(),
+                short_hash: "c1".to_string(),
+                message: "initial commit".to_string(),
+                author: "author".to_string(),
+                email: "email".to_string(),
+                timestamp: SystemTime::UNIX_EPOCH,
+                parents: vec![],
+            }],
+            branches: vec![Branch {
+                name: "main".to_string(),
+                is_current: true,
+                is_remote: false,
+                upstream: None,
+                tip_hash: "c1".to_string(),
+            }],
+            remotes: vec![],
+            tags: vec![Tag {
+                name: "v1.0.0".to_string(),
+                target_hash: "c1".to_string(),
+                author: "author".to_string(),
+                timestamp: SystemTime::UNIX_EPOCH,
+            }],
+            stashes: vec![],
+            status: RepoStatus {
+                branch: "main".to_string(),
+                staged_count: 0,
+                unstaged_count: 0,
+                staged_files: vec![],
+                unstaged_files: vec![],
+                additions: 0,
+                deletions: 0,
+                files_changed: 0,
+            },
+            repo_error: None,
+            last_refresh: None,
+            ownership: Some(true),
+        };
+
+        let dc = DiskCache {
+            schema_version: SCHEMA_VERSION,
+            repo_path: path_str.clone(),
+            repo_fingerprint: "fp-initial".to_string(),
+            captured_at: 1000,
+            local_snapshot: local,
+            remote_snapshot: None,
+            prs_etag: None,
+            actions_etag: None,
+            releases_etag: None,
+            packages_container_etag: None,
+            packages_npm_etag: None,
+        };
+
+        // First full save
+        save_cache(&dc, None).unwrap();
+
+        // 1. Test status-only persistence (only changes status tables, does not alter commits table)
+        let new_status = RepoStatus {
+            branch: "feature-branch".to_string(),
+            staged_count: 5,
+            unstaged_count: 2,
+            staged_files: vec![],
+            unstaged_files: vec![],
+            additions: 50,
+            deletions: 10,
+            files_changed: 1,
+        };
+        let fp_status = RepoFingerprints {
+            head: "fp-status-head".to_string(),
+            index: "fp-status-index".to_string(),
+            refs_heads: "fp-status-heads".to_string(),
+            refs_remotes: "fp-status-remotes".to_string(),
+            refs_tags: "fp-status-tags".to_string(),
+            packed_refs: "fp-status-packed".to_string(),
+            config: "fp-status-config".to_string(),
+        };
+
+        save_status_slice(&path_str, &new_status, &fp_status).unwrap();
+
+        // Reload and assert
+        let loaded = load_cache(&path_str, None).unwrap();
+        // status is updated
+        assert_eq!(loaded.local_snapshot.status.branch, "feature-branch");
+        assert_eq!(loaded.local_snapshot.status.staged_count, 5);
+        assert_eq!(loaded.local_snapshot.status.additions, 50);
+        // commits are NOT altered (still 1 commit)
+        assert_eq!(loaded.local_snapshot.commits.len(), 1);
+        assert_eq!(loaded.local_snapshot.commits[0].hash, "c1");
+
+        // 2. Test tag-only persistence (only changes tags table, does not alter status table)
+        let new_tags = vec![
+            Tag {
+                name: "v2.0.0".to_string(),
+                target_hash: "c2".to_string(),
+                author: "new author".to_string(),
+                timestamp: SystemTime::UNIX_EPOCH,
+            },
+            Tag {
+                name: "v3.0.0".to_string(),
+                target_hash: "c3".to_string(),
+                author: "new author".to_string(),
+                timestamp: SystemTime::UNIX_EPOCH,
+            },
+        ];
+        let fp_tags = RepoFingerprints {
+            head: "fp-status-head".to_string(),
+            index: "fp-status-index".to_string(),
+            refs_heads: "fp-status-heads".to_string(),
+            refs_remotes: "fp-status-remotes".to_string(),
+            refs_tags: "fp-tags-tags".to_string(),
+            packed_refs: "fp-status-packed".to_string(),
+            config: "fp-status-config".to_string(),
+        };
+
+        save_tags_slice(&path_str, &new_tags, &fp_tags).unwrap();
+
+        let loaded = load_cache(&path_str, None).unwrap();
+        // tags are updated
+        assert_eq!(loaded.local_snapshot.tags.len(), 2);
+        assert_eq!(loaded.local_snapshot.tags[0].name, "v2.0.0");
+        assert_eq!(loaded.local_snapshot.tags[1].name, "v3.0.0");
+        // status is NOT altered (still "feature-branch")
+        assert_eq!(loaded.local_snapshot.status.branch, "feature-branch");
+
+        // 3. Test ref-only persistence (only changes branches table, does not alter tags table)
+        let new_branches = vec![
+            Branch {
+                name: "main-new".to_string(),
+                is_current: false,
+                is_remote: false,
+                upstream: None,
+                tip_hash: "c1".to_string(),
+            },
+            Branch {
+                name: "feature-branch".to_string(),
+                is_current: true,
+                is_remote: false,
+                upstream: None,
+                tip_hash: "c2".to_string(),
+            },
+        ];
+        let fp_branches = RepoFingerprints {
+            head: "fp-branches-head".to_string(),
+            index: "fp-status-index".to_string(),
+            refs_heads: "fp-branches-heads".to_string(),
+            refs_remotes: "fp-status-remotes".to_string(),
+            refs_tags: "fp-tags-tags".to_string(),
+            packed_refs: "fp-status-packed".to_string(),
+            config: "fp-status-config".to_string(),
+        };
+
+        save_refs_slice(&path_str, &new_branches, &fp_branches).unwrap();
+
+        let loaded = load_cache(&path_str, None).unwrap();
+        // branches/refs are updated
+        assert_eq!(loaded.local_snapshot.branches.len(), 2);
+        assert_eq!(loaded.local_snapshot.branches[0].name, "feature-branch");
+        assert_eq!(loaded.local_snapshot.branches[1].name, "main-new");
+        // tags are NOT altered (still 2 tags)
+        assert_eq!(loaded.local_snapshot.tags.len(), 2);
+        assert_eq!(loaded.local_snapshot.tags[0].name, "v2.0.0");
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_touch_github_cache_entry() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "palimpsest_touch_test_{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_dir.join(".git")).unwrap();
+        let _guard = TestDbGuard::new(temp_dir.join("test.db"));
+        let path_str = temp_dir.to_str().unwrap().to_string();
+
+        let conn = open_conn().unwrap();
+        let _repo_id = get_or_create_repo(&conn, &path_str).unwrap();
+
+        // 1. Initial save with error
+        save_github_cache_entry(
+            &path_str,
+            "alice",
+            "prs",
+            Some("etag-initial"),
+            1000,
+            Some("Rate Limit Exceeded"),
+            "[\"initial\"]",
+        )
+        .unwrap();
+
+        // 2. Touch to mock a successful 304 response (updates fetched_at, clears prior error, preserves payload and ETag)
+        touch_github_cache_entry(&path_str, "alice", "prs", 2000, true).unwrap();
+
+        let (etag, fetched_at, error, payload) = load_github_cache_entry(&path_str, "alice", "prs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(etag.as_deref(), Some("etag-initial"));
+        assert_eq!(fetched_at, 2000);
+        assert_eq!(error, None); // error is cleared
+        assert_eq!(payload, "[\"initial\"]"); // payload is preserved
+
+        // 3. Touch with clear_error = false
+        // First save with error again
+        save_github_cache_entry(
+            &path_str,
+            "alice",
+            "prs",
+            Some("etag-initial"),
+            2000,
+            Some("Another Error"),
+            "[\"initial\"]",
+        )
+        .unwrap();
+
+        // Touch with clear_error = false
+        touch_github_cache_entry(&path_str, "alice", "prs", 3000, false).unwrap();
+
+        let (_, fetched_at, error, _) = load_github_cache_entry(&path_str, "alice", "prs")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched_at, 3000);
+        assert_eq!(error.as_deref(), Some("Another Error")); // error is not cleared
+
+        fs::remove_dir_all(&temp_dir).unwrap();
     }
 }

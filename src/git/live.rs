@@ -436,7 +436,7 @@ pub fn spawn_repo_tracker(
         let mut packages_container_etag = None;
         let mut packages_npm_etag = None;
 
-        if let Some(disk_cache) = crate::git::cache::load_cache(&path) {
+        if let Some(disk_cache) = crate::git::cache::load_cache(&path, github_login.as_deref()) {
             cached_local = Some(disk_cache.local_snapshot.to_snapshot());
             cached_remote = disk_cache.remote_snapshot;
             prs_etag = disk_cache.prs_etag;
@@ -576,12 +576,19 @@ pub fn spawn_repo_tracker(
                     );
                     let mut changed = false;
                     let mut errors = Vec::new();
+                    let mut status_changed = false;
+                    let mut commits_changed = false;
+                    let mut refs_changed = false;
+                    let mut remotes_changed = false;
+                    let mut tags_changed = false;
+                    let mut stashes_changed = false;
 
                     if dirty_slices.commits {
                         match collect_commits_window(&repo) {
                             Ok(c) => {
                                 if current_local.commits != c {
                                     current_local.commits = c;
+                                    commits_changed = true;
                                     changed = true;
                                 }
                             }
@@ -593,6 +600,7 @@ pub fn spawn_repo_tracker(
                             Ok(b) => {
                                 if current_local.branches != b {
                                     current_local.branches = b;
+                                    refs_changed = true;
                                     changed = true;
                                 }
                             }
@@ -608,6 +616,7 @@ pub fn spawn_repo_tracker(
                                         &current_local.remotes,
                                         github_login.as_deref(),
                                     );
+                                    remotes_changed = true;
                                     changed = true;
                                 }
                             }
@@ -619,6 +628,7 @@ pub fn spawn_repo_tracker(
                             Ok(t) => {
                                 if current_local.tags != t {
                                     current_local.tags = t;
+                                    tags_changed = true;
                                     changed = true;
                                 }
                             }
@@ -630,6 +640,7 @@ pub fn spawn_repo_tracker(
                             Ok(s) => {
                                 if current_local.stashes != s {
                                     current_local.stashes = s;
+                                    stashes_changed = true;
                                     changed = true;
                                 }
                             }
@@ -641,6 +652,7 @@ pub fn spawn_repo_tracker(
                             Ok(s) => {
                                 if current_local.status != s {
                                     current_local.status = s;
+                                    status_changed = true;
                                     changed = true;
                                 }
                             }
@@ -670,22 +682,68 @@ pub fn spawn_repo_tracker(
                         });
                         ctx.request_repaint();
 
-                        let dc = crate::git::cache::DiskCache {
-                            schema_version: crate::git::cache::SCHEMA_VERSION,
-                            repo_path: path.clone(),
-                            repo_fingerprint: String::new(),
-                            captured_at: now_millis(),
-                            local_snapshot: crate::git::cache::BoundedLocalSnapshot::from_snapshot(
-                                &current_local,
-                            ),
-                            remote_snapshot: cached_remote.clone(),
-                            prs_etag: prs_etag.clone(),
-                            actions_etag: actions_etag.clone(),
-                            releases_etag: releases_etag.clone(),
-                            packages_container_etag: packages_container_etag.clone(),
-                            packages_npm_etag: packages_npm_etag.clone(),
-                        };
-                        let _ = crate::git::cache::save_cache(&dc);
+                        if stored_fps.is_none() {
+                            let dc = crate::git::cache::DiskCache {
+                                schema_version: crate::git::cache::SCHEMA_VERSION,
+                                repo_path: path.clone(),
+                                repo_fingerprint: String::new(),
+                                captured_at: now_millis(),
+                                local_snapshot:
+                                    crate::git::cache::BoundedLocalSnapshot::from_snapshot(
+                                        &current_local,
+                                    ),
+                                remote_snapshot: cached_remote.clone(),
+                                prs_etag: prs_etag.clone(),
+                                actions_etag: actions_etag.clone(),
+                                releases_etag: releases_etag.clone(),
+                                packages_container_etag: packages_container_etag.clone(),
+                                packages_npm_etag: packages_npm_etag.clone(),
+                            };
+                            let _ = crate::git::cache::save_cache(&dc, github_login.as_deref());
+                        } else {
+                            if status_changed {
+                                let _ = crate::git::cache::save_status_slice(
+                                    &path,
+                                    &current_local.status,
+                                    &new_fps,
+                                );
+                            }
+                            if commits_changed {
+                                let _ = crate::git::cache::save_commits_slice(
+                                    &path,
+                                    &current_local.commits,
+                                    &new_fps,
+                                );
+                            }
+                            if refs_changed {
+                                let _ = crate::git::cache::save_refs_slice(
+                                    &path,
+                                    &current_local.branches,
+                                    &new_fps,
+                                );
+                            }
+                            if remotes_changed {
+                                let _ = crate::git::cache::save_remotes_slice(
+                                    &path,
+                                    &current_local.remotes,
+                                    &new_fps,
+                                );
+                            }
+                            if tags_changed {
+                                let _ = crate::git::cache::save_tags_slice(
+                                    &path,
+                                    &current_local.tags,
+                                    &new_fps,
+                                );
+                            }
+                            if stashes_changed {
+                                let _ = crate::git::cache::save_stashes_slice(
+                                    &path,
+                                    &current_local.stashes,
+                                    &new_fps,
+                                );
+                            }
+                        }
                         stored_fps = Some(new_fps);
                     } else if fps_changed {
                         let _ = crate::git::cache::save_fingerprints(&path, &new_fps);
@@ -754,7 +812,17 @@ pub fn spawn_repo_tracker(
                                     }
                                     remote_changed = true;
                                 }
-                                Ok(github_api::GitHubResponse::NotModified) => {}
+                                Ok(github_api::GitHubResponse::NotModified) => {
+                                    if let Some(ref login) = github_login {
+                                        let _ = crate::git::cache::touch_github_cache_entry(
+                                            &path,
+                                            login,
+                                            "prs",
+                                            now_millis(),
+                                            true,
+                                        );
+                                    }
+                                }
                                 Ok(github_api::GitHubResponse::Error(e)) => {
                                     errors.push(format!("PRs: {e}"))
                                 }
@@ -785,7 +853,17 @@ pub fn spawn_repo_tracker(
                                     }
                                     remote_changed = true;
                                 }
-                                Ok(github_api::GitHubResponse::NotModified) => {}
+                                Ok(github_api::GitHubResponse::NotModified) => {
+                                    if let Some(ref login) = github_login {
+                                        let _ = crate::git::cache::touch_github_cache_entry(
+                                            &path,
+                                            login,
+                                            "actions",
+                                            now_millis(),
+                                            true,
+                                        );
+                                    }
+                                }
                                 Ok(github_api::GitHubResponse::Error(e)) => {
                                     errors.push(format!("Actions: {e}"))
                                 }
@@ -816,7 +894,17 @@ pub fn spawn_repo_tracker(
                                     }
                                     remote_changed = true;
                                 }
-                                Ok(github_api::GitHubResponse::NotModified) => {}
+                                Ok(github_api::GitHubResponse::NotModified) => {
+                                    if let Some(ref login) = github_login {
+                                        let _ = crate::git::cache::touch_github_cache_entry(
+                                            &path,
+                                            login,
+                                            "releases",
+                                            now_millis(),
+                                            true,
+                                        );
+                                    }
+                                }
                                 Ok(github_api::GitHubResponse::Error(e)) => {
                                     errors.push(format!("Releases: {e}"))
                                 }
@@ -859,6 +947,15 @@ pub fn spawn_repo_tracker(
                                                         .cloned(),
                                                 );
                                             }
+                                            if let Some(ref login) = github_login {
+                                                let _ = crate::git::cache::touch_github_cache_entry(
+                                                    &path,
+                                                    login,
+                                                    "packages_container",
+                                                    now_millis(),
+                                                    true,
+                                                );
+                                            }
                                         }
                                         github_api::GitHubResponse::Error(e) => {
                                             errors.push(format!("Container Packages: {e}"))
@@ -882,6 +979,15 @@ pub fn spawn_repo_tracker(
                                                         .iter()
                                                         .filter(|p| p.package_type == "npm")
                                                         .cloned(),
+                                                );
+                                            }
+                                            if let Some(ref login) = github_login {
+                                                let _ = crate::git::cache::touch_github_cache_entry(
+                                                    &path,
+                                                    login,
+                                                    "packages_npm",
+                                                    now_millis(),
+                                                    true,
                                                 );
                                             }
                                         }
@@ -936,7 +1042,7 @@ pub fn spawn_repo_tracker(
                                     packages_container_etag: packages_container_etag.clone(),
                                     packages_npm_etag: packages_npm_etag.clone(),
                                 };
-                                let _ = crate::git::cache::save_cache(&dc);
+                                let _ = crate::git::cache::save_cache(&dc, github_login.as_deref());
                             }
 
                             if !errors.is_empty() {

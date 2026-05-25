@@ -500,7 +500,9 @@ impl PalimpsestApp {
 
                 if has_memory_cache {
                     self.sync_active_repo_from_cache(path);
-                } else if let Some(disk_cache) = palimpsest::git::cache::load_cache(path) {
+                } else if let Some(disk_cache) =
+                    palimpsest::git::cache::load_cache(path, self.authed_github_login.as_deref())
+                {
                     if let Some(entry) = self.repo_live_states.get_mut(path) {
                         entry.local = Some(disk_cache.local_snapshot.to_snapshot());
                         entry.remote = disk_cache.remote_snapshot;
@@ -923,7 +925,9 @@ impl PalimpsestApp {
         use palimpsest::ui::repo_manager::{format_relative_time, parse_tag_version};
 
         // 1. Try to load from disk cache first
-        if let Some(disk_cache) = palimpsest::git::cache::load_cache(path) {
+        if let Some(disk_cache) =
+            palimpsest::git::cache::load_cache(path, self.authed_github_login.as_deref())
+        {
             let local = &disk_cache.local_snapshot;
             let repo_name = std::path::Path::new(path)
                 .file_name()
