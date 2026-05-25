@@ -351,6 +351,66 @@ impl GitRepo {
         Ok(result)
     }
 
+    pub fn tags_limit(&self, limit: Option<usize>) -> Result<Vec<Tag>, GitError> {
+        let tags = self.repo.tag_names(None)?;
+        let mut tag_names: Vec<String> = tags
+            .iter()
+            .filter_map(|r| r.ok().flatten())
+            .map(|s| s.to_string())
+            .collect();
+
+        tag_names.sort_by(|a, b| {
+            let va = parse_tag_name_version(a);
+            let vb = parse_tag_name_version(b);
+            vb.cmp(&va)
+        });
+
+        let names_to_peel = if let Some(l) = limit {
+            if tag_names.len() > l {
+                &tag_names[..l]
+            } else {
+                &tag_names[..]
+            }
+        } else {
+            &tag_names[..]
+        };
+
+        let mut result = Vec::new();
+        for name in names_to_peel {
+            let oid = self.repo.revparse_single(&format!("refs/tags/{}", name))?;
+            let target = oid.peel_to_commit()?;
+            let (author, timestamp) = if let Ok(tag) = self.repo.find_tag(oid.id()) {
+                if let Some(tagger) = tag.tagger() {
+                    (
+                        tagger.name().unwrap_or("Unknown").to_string(),
+                        secs_to_system_time(tagger.when().seconds()),
+                    )
+                } else {
+                    let author = target.author();
+                    (
+                        author.name().unwrap_or("Unknown").to_string(),
+                        secs_to_system_time(author.when().seconds()),
+                    )
+                }
+            } else {
+                let author = target.author();
+                (
+                    author.name().unwrap_or("Unknown").to_string(),
+                    secs_to_system_time(author.when().seconds()),
+                )
+            };
+            result.push(Tag {
+                name: name.clone(),
+                target_hash: target.id().to_string()[..7].to_string(),
+                author,
+                timestamp,
+            });
+        }
+
+        tracing::info!(count = result.len(), "Tags fetched (limited)");
+        Ok(result)
+    }
+
     pub fn stashes(&self) -> Result<Vec<Stash>, GitError> {
         tracing::debug!("Fetching stashes");
         let mut stash_oids = Vec::new();
@@ -1117,6 +1177,15 @@ fn secs_to_system_time(secs: i64) -> SystemTime {
     } else {
         SystemTime::UNIX_EPOCH
     }
+}
+
+fn parse_tag_name_version(tag: &str) -> (u64, u64, u64) {
+    let stripped = tag.strip_prefix('v').unwrap_or(tag);
+    let mut parts = stripped.split('.');
+    let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (major, minor, patch)
 }
 
 #[cfg(test)]

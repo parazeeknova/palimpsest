@@ -1,6 +1,6 @@
 [package]
 name = "palimpsest"
-version = "0.0.92"
+version = "0.0.94"
 edition = "2024"
 description = "A git history visualizer"
 homepage = "https://github.com/parazeeknova/palimpsest"

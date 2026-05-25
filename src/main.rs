@@ -102,6 +102,7 @@ struct RepoLiveState {
 
 struct RepoTrackerHandle {
     stop: Arc<AtomicBool>,
+    watch_tx: std::sync::mpsc::Sender<palimpsest::git::live::WatchEvent>,
 }
 
 impl PalimpsestApp {
@@ -258,7 +259,7 @@ impl PalimpsestApp {
                 remote: None,
             });
 
-        palimpsest::git::live::spawn_repo_tracker(
+        let watch_tx = palimpsest::git::live::spawn_repo_tracker(
             path.to_string(),
             generation,
             self.repo_live_tx.clone(),
@@ -268,7 +269,7 @@ impl PalimpsestApp {
         );
 
         self.repo_live_trackers
-            .insert(path.to_string(), RepoTrackerHandle { stop });
+            .insert(path.to_string(), RepoTrackerHandle { stop, watch_tx });
     }
 
     fn ensure_ownership_probes(&mut self) {
@@ -490,7 +491,26 @@ impl PalimpsestApp {
                 let ctx = self.egui_ctx.clone();
                 self.ensure_repo_tracker(path, &ctx);
                 self.store.dispatch(AppAction::OpenRepo(path.to_string()));
-                self.refresh_git_data();
+
+                let has_memory_cache = if let Some(entry) = self.repo_live_states.get(path) {
+                    entry.local.is_some()
+                } else {
+                    false
+                };
+
+                if has_memory_cache {
+                    self.sync_active_repo_from_cache(path);
+                } else if let Some(disk_cache) = palimpsest::git::cache::load_cache(path) {
+                    if let Some(entry) = self.repo_live_states.get_mut(path) {
+                        entry.local = Some(disk_cache.local_snapshot.to_snapshot());
+                        entry.remote = disk_cache.remote_snapshot;
+                    }
+                    self.sync_active_repo_from_cache(path);
+                } else {
+                    self.refresh_git_data();
+                }
+
+                self.evict_stale_caches();
                 self.persist_session();
             }
             Err(e) => {
@@ -519,6 +539,42 @@ impl PalimpsestApp {
                     self.store.dispatch(AppAction::SelectManagerRepo(None));
                 }
                 self.persist_session();
+            }
+        }
+    }
+
+    fn evict_stale_caches(&mut self) {
+        let state = self.store.get_state();
+        let mut keep = std::collections::HashSet::new();
+        if let Some(ref current) = state.current_repo {
+            keep.insert(current.clone());
+        }
+        for tab in &state.open_tabs {
+            keep.insert(tab.clone());
+        }
+        for repo in state.recent_repos.iter().take(20) {
+            keep.insert(repo.path.clone());
+        }
+
+        let to_remove: Vec<String> = self
+            .repo_live_states
+            .keys()
+            .filter(|k| !keep.contains(*k))
+            .cloned()
+            .collect();
+
+        for path in to_remove {
+            self.stop_repo_tracker(&path);
+            self.repo_live_states.remove(&path);
+        }
+    }
+
+    fn trigger_tracker_refresh(&self) {
+        if let Some(path) = self.store.get_state().current_repo.as_ref() {
+            if let Some(handle) = self.repo_live_trackers.get(path) {
+                let _ = handle
+                    .watch_tx
+                    .send(palimpsest::git::live::WatchEvent::ForceRefresh);
             }
         }
     }
@@ -866,6 +922,165 @@ impl PalimpsestApp {
         };
         use palimpsest::ui::repo_manager::{format_relative_time, parse_tag_version};
 
+        // 1. Try to load from disk cache first
+        if let Some(disk_cache) = palimpsest::git::cache::load_cache(path) {
+            let local = &disk_cache.local_snapshot;
+            let repo_name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path)
+                .to_string();
+            let branch = local.status.branch.clone();
+            let uncommitted = local.status.staged_count + local.status.unstaged_count;
+
+            let manager_remotes: Vec<ManagerRemote> = local
+                .remotes
+                .iter()
+                .map(|r| {
+                    let is_github = palimpsest::ui::repo_manager::is_github_url(&r.url);
+                    ManagerRemote {
+                        name: r.name.clone(),
+                        url: r.url.clone(),
+                        is_github,
+                    }
+                })
+                .collect();
+
+            let manager_branches: Vec<ManagerBranch> = local
+                .branches
+                .iter()
+                .take(5)
+                .map(|b| {
+                    let tip_commit = local
+                        .commits
+                        .iter()
+                        .find(|c| c.hash.starts_with(&b.tip_hash) || c.short_hash == b.tip_hash);
+                    ManagerBranch {
+                        name: b.name.clone(),
+                        last_message: tip_commit
+                            .map(|c| c.message.lines().next().unwrap_or("").to_string())
+                            .unwrap_or_default(),
+                        author: tip_commit.map(|c| c.author.clone()).unwrap_or_default(),
+                        relative_date: tip_commit
+                            .map(|c| {
+                                format_relative_time(
+                                    c.timestamp
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0),
+                                )
+                            })
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect();
+
+            let mut tags = local.tags.clone();
+            tags.sort_by(|a, b| {
+                let va = parse_tag_version(&a.name);
+                let vb = parse_tag_version(&b.name);
+                vb.cmp(&va)
+            });
+            let manager_tags: Vec<ManagerTag> = tags
+                .iter()
+                .take(5)
+                .map(|t| ManagerTag {
+                    name: t.name.clone(),
+                    author: t.author.clone(),
+                    relative_date: format_relative_time(
+                        t.timestamp
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                    ),
+                })
+                .collect();
+
+            let manager_commits: Vec<ManagerCommit> = local
+                .commits
+                .iter()
+                .take(5)
+                .map(|c| ManagerCommit {
+                    message: c.message.lines().next().unwrap_or("").to_string(),
+                    author: c.author.clone(),
+                    relative_date: format_relative_time(
+                        c.timestamp
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                    ),
+                })
+                .collect();
+
+            let last_date = local.commits.first().map_or("unknown".to_string(), |c| {
+                format_relative_time(
+                    c.timestamp
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                )
+            });
+
+            let initial_date = local.commits.last().map_or("unknown".to_string(), |c| {
+                format_relative_time(
+                    c.timestamp
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                )
+            });
+
+            let owned_by_authed_user = local.ownership;
+
+            let details = ManagerRepoDetails {
+                repo_path: path.to_string(),
+                repo_name,
+                branch,
+                uncommitted_files: uncommitted,
+                total_commits: local.commits.len(),
+                initial_commit_date: initial_date,
+                last_commit_date: last_date,
+                remotes: manager_remotes,
+                branches: manager_branches,
+                tags: manager_tags,
+                commits: manager_commits,
+                owned_by_authed_user,
+                is_org: None,
+                is_private: None,
+            };
+
+            self.store
+                .dispatch(AppAction::SetManagerDetails(Some(details.clone())));
+            self.trigger_github_metadata_fetch(details);
+
+            // Spawn background task for history stats to refresh details lazily
+            let store = self.store.clone();
+            let path_str = path.to_string();
+            std::thread::spawn(move || {
+                if let Ok(repo) = GitRepo::open(&path_str) {
+                    if let Ok((total_commits, oldest_commit)) = repo.history_stats() {
+                        let initial_date = oldest_commit.map_or("unknown".to_string(), |c| {
+                            format_relative_time(
+                                c.timestamp
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0),
+                            )
+                        });
+                        if let Some(mut details) = store.get_state().manager_details {
+                            if details.repo_path == path_str {
+                                details.total_commits = total_commits;
+                                details.initial_commit_date = initial_date;
+                                store.dispatch(AppAction::SetManagerDetails(Some(details)));
+                            }
+                        }
+                    }
+                }
+            });
+            return;
+        }
+
+        // 2. Fallback: load dynamically if no cache exists
         match GitRepo::open(path) {
             Ok(repo) => {
                 let repo_name = repo.repo_name().unwrap_or_else(|| path.to_string());
@@ -877,16 +1092,6 @@ impl PalimpsestApp {
                     .map_or(0, |s| s.staged_count + s.unstaged_count);
 
                 let commits = repo.commits(Some(20)).unwrap_or_default();
-                let (total_commits, oldest_commit) = repo.history_stats().unwrap_or((0, None));
-
-                let initial_date = oldest_commit.map_or("unknown".to_string(), |c| {
-                    format_relative_time(
-                        c.timestamp
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0),
-                    )
-                });
                 let last_date = commits.first().map_or("unknown".to_string(), |c| {
                     format_relative_time(
                         c.timestamp
@@ -914,8 +1119,9 @@ impl PalimpsestApp {
                     })
                     .collect();
 
-                let branches = repo.branches().unwrap_or_default();
-                let manager_branches: Vec<ManagerBranch> = branches
+                let manager_branches: Vec<ManagerBranch> = repo
+                    .branches()
+                    .unwrap_or_default()
                     .iter()
                     .take(5)
                     .map(|b| {
@@ -942,7 +1148,7 @@ impl PalimpsestApp {
                     })
                     .collect();
 
-                let mut tags = repo.tags().unwrap_or_default();
+                let mut tags = repo.tags_limit(Some(5)).unwrap_or_default();
                 tags.sort_by(|a, b| {
                     let va = parse_tag_version(&a.name);
                     let vb = parse_tag_version(&b.name);
@@ -983,8 +1189,8 @@ impl PalimpsestApp {
                     repo_name,
                     branch,
                     uncommitted_files: uncommitted,
-                    total_commits,
-                    initial_commit_date: initial_date,
+                    total_commits: 0,
+                    initial_commit_date: "loading...".to_string(),
                     last_commit_date: last_date,
                     remotes: manager_remotes,
                     branches: manager_branches,
@@ -998,6 +1204,31 @@ impl PalimpsestApp {
                 self.store
                     .dispatch(AppAction::SetManagerDetails(Some(details.clone())));
                 self.trigger_github_metadata_fetch(details);
+
+                // Spawn background task for history stats
+                let store = self.store.clone();
+                let path_str = path.to_string();
+                std::thread::spawn(move || {
+                    if let Ok(repo) = GitRepo::open(&path_str) {
+                        if let Ok((total_commits, oldest_commit)) = repo.history_stats() {
+                            let initial_date = oldest_commit.map_or("unknown".to_string(), |c| {
+                                format_relative_time(
+                                    c.timestamp
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0),
+                                )
+                            });
+                            if let Some(mut details) = store.get_state().manager_details {
+                                if details.repo_path == path_str {
+                                    details.total_commits = total_commits;
+                                    details.initial_commit_date = initial_date;
+                                    store.dispatch(AppAction::SetManagerDetails(Some(details)));
+                                }
+                            }
+                        }
+                    }
+                });
             }
             Err(e) => {
                 tracing::warn!(path = %path, error = %e, "Repo not found, removing from recents");
@@ -1460,7 +1691,6 @@ impl eframe::App for PalimpsestApp {
         // Auto fetch remote GitHub data if repository changes
         if state.current_repo != self.last_fetched_repo {
             self.last_fetched_repo = state.current_repo.clone();
-            self.refresh_github_remote_data(ui.ctx().clone());
         }
 
         let repo_name = self.repo_name();
@@ -1577,7 +1807,7 @@ impl eframe::App for PalimpsestApp {
             }
             titlebar::OpenAction::Refresh => {
                 self.refresh_git_data();
-                self.refresh_github_remote_data(ui.ctx().clone());
+                self.trigger_tracker_refresh();
             }
             titlebar::OpenAction::Fetch => {
                 let ctx = ui.ctx().clone();
@@ -1708,7 +1938,7 @@ impl eframe::App for PalimpsestApp {
             }
             toolbar::ToolbarAction::Fetch => {
                 self.handle_quick_launch_action(QuickLaunchAction::Fetch, &ctx);
-                self.refresh_github_remote_data(ctx.clone());
+                self.trigger_tracker_refresh();
             }
             toolbar::ToolbarAction::Pull => {
                 self.handle_quick_launch_action(QuickLaunchAction::Pull, &ctx);
@@ -1868,7 +2098,7 @@ impl eframe::App for PalimpsestApp {
             if self.git_repo.is_some() {
                 if ctx.input_mut(|i| i.consume_shortcut(&refresh_shortcut)) {
                     self.refresh_git_data();
-                    self.refresh_github_remote_data(ctx.clone());
+                    self.trigger_tracker_refresh();
                 }
                 if ctx.input_mut(|i| i.consume_shortcut(&fetch_shortcut)) {
                     let ctx_cloned = ctx.clone();
@@ -2552,153 +2782,6 @@ impl PalimpsestApp {
                     .spawn();
             }
         }
-    }
-
-    fn refresh_github_remote_data(&self, ctx: egui::Context) {
-        let state = self.store.get_state();
-        if state.github_loading {
-            return;
-        }
-
-        let creds = palimpsest::auth::credentials::load_credentials();
-        let Some(token) = creds.github_token.clone() else {
-            return;
-        };
-
-        let mut gh_remote = None;
-        for remote in &state.cached_remotes {
-            if let Some((owner, repo)) = parse_github_remote(&remote.url) {
-                gh_remote = Some((owner, repo));
-                break;
-            }
-        }
-
-        let Some((owner, repo)) = gh_remote else {
-            // Clear GitHub remote data from state if there is no GitHub remote
-            self.store.dispatch(AppAction::SetGitHubData {
-                pull_requests: Vec::new(),
-                action_runs: Vec::new(),
-                releases: Vec::new(),
-                packages: Vec::new(),
-            });
-            return;
-        };
-
-        self.store.dispatch(AppAction::SetGitHubLoading(true));
-
-        let store = self.store.clone();
-        std::thread::spawn(move || {
-            tracing::info!(owner = %owner, repo = %repo, "Fetching GitHub remote data in background");
-
-            let pulls = palimpsest::auth::github_api::list_pull_requests(&token, &owner, &repo);
-            let actions = palimpsest::auth::github_api::list_action_runs(&token, &owner, &repo);
-            let releases = palimpsest::auth::github_api::list_releases(&token, &owner, &repo);
-
-            let is_org =
-                match palimpsest::auth::github_api::get_repo_owner_type(&token, &owner, &repo) {
-                    Ok(owner_type) => owner_type.to_lowercase() == "organization",
-                    Err(_) => false,
-                };
-
-            let packages = palimpsest::auth::github_api::list_packages(&token, &owner, is_org);
-
-            let mut errors = Vec::new();
-
-            let pr_list = match pulls {
-                Ok(p) => p,
-                Err(e) => {
-                    errors.push(format!("PRs: {}", e));
-                    Vec::new()
-                }
-            };
-
-            let action_list = match actions {
-                Ok(a) => a,
-                Err(e) => {
-                    errors.push(format!("Actions: {}", e));
-                    Vec::new()
-                }
-            };
-
-            let release_list = match releases {
-                Ok(r) => r,
-                Err(e) => {
-                    errors.push(format!("Releases: {}", e));
-                    Vec::new()
-                }
-            };
-
-            let package_list = match packages {
-                Ok(pkg) => pkg,
-                Err(e) => {
-                    errors.push(format!("Packages: {}", e));
-                    Vec::new()
-                }
-            };
-
-            let mapped_prs = pr_list
-                .into_iter()
-                .map(|pr| palimpsest::state::GitHubPullRequest {
-                    number: pr.number,
-                    title: pr.title,
-                    state: pr.state,
-                    user_login: pr.user_login,
-                    html_url: pr.html_url,
-                    head_ref: pr.head_ref,
-                    base_ref: pr.base_ref,
-                    draft: pr.draft,
-                })
-                .collect::<Vec<_>>();
-
-            let mapped_actions = action_list
-                .into_iter()
-                .map(|run| palimpsest::state::GitHubActionRun {
-                    id: run.id,
-                    name: run.name,
-                    status: run.status,
-                    conclusion: run.conclusion,
-                    html_url: run.html_url,
-                    head_branch: run.head_branch,
-                })
-                .collect::<Vec<_>>();
-
-            let mapped_releases = release_list
-                .into_iter()
-                .map(|rel| palimpsest::state::GitHubRelease {
-                    tag_name: rel.tag_name,
-                    name: rel.name,
-                    html_url: rel.html_url,
-                    draft: rel.draft,
-                    prerelease: rel.prerelease,
-                    body: rel.body,
-                })
-                .collect::<Vec<_>>();
-
-            let mapped_packages = package_list
-                .into_iter()
-                .map(|pkg| palimpsest::state::GitHubPackage {
-                    name: pkg.name,
-                    package_type: pkg.package_type,
-                    html_url: pkg.html_url,
-                })
-                .collect::<Vec<_>>();
-
-            store.dispatch(AppAction::SetGitHubData {
-                pull_requests: mapped_prs,
-                action_runs: mapped_actions,
-                releases: mapped_releases,
-                packages: mapped_packages,
-            });
-
-            if !errors.is_empty() {
-                store.dispatch(AppAction::SetGitHubError(Some(errors.join(", "))));
-            } else {
-                store.dispatch(AppAction::SetGitHubError(None));
-            }
-
-            store.dispatch(AppAction::SetGitHubLoading(false));
-            ctx.request_repaint();
-        });
     }
 }
 
