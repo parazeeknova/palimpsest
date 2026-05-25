@@ -21,7 +21,16 @@ pub struct CommitDrawerCommit {
     pub author: String,
     pub email: String,
     pub timestamp: String,
+    pub timestamp_exact: String,
     pub parents: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CommitDrawerSignature {
+    pub status: String,
+    pub summary: Option<String>,
+    pub key_id: Option<String>,
+    pub trust: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -79,6 +88,7 @@ pub fn show(
     state: &mut State,
     app_state: &AppState,
     commit: Option<&CommitDrawerCommit>,
+    signature: Option<&CommitDrawerSignature>,
     files: &[FileStatus],
 ) {
     let fill = egui::Color32::from_rgb(36, 36, 36);
@@ -163,7 +173,9 @@ pub fn show(
                 paint_commit_summary(ui, commit, muted);
                 ui.add_space(12.0);
                 match state.tab {
-                    CommitDrawerTab::Commit => paint_commit_tab(ui, commit, files, muted),
+                    CommitDrawerTab::Commit => {
+                        paint_commit_tab(ui, commit, signature, files, app_state, muted)
+                    }
                     CommitDrawerTab::Changes => paint_changes_tab(ui, files, muted),
                     CommitDrawerTab::FileTree => {
                         paint_tree_tab(ui, &mut state.tree_state, files, muted)
@@ -207,25 +219,220 @@ fn paint_commit_summary(ui: &mut egui::Ui, commit: &CommitDrawerCommit, muted: e
 fn paint_commit_tab(
     ui: &mut egui::Ui,
     commit: &CommitDrawerCommit,
+    signature: Option<&CommitDrawerSignature>,
     files: &[FileStatus],
+    app_state: &AppState,
     muted: egui::Color32,
 ) {
-    ui.label(
-        egui::RichText::new(format!("SHA: {}", commit.hash))
-            .size(10.0)
-            .color(muted),
-    );
-    ui.label(
-        egui::RichText::new(format!("Parents: {}", commit.parents.join(", ")))
-            .size(10.0)
-            .color(muted),
-    );
-    ui.add_space(8.0);
-    paint_changes_list(ui, files, muted);
+    paint_commit_details(ui, commit, signature, files, app_state, muted);
 }
 
 fn paint_changes_tab(ui: &mut egui::Ui, files: &[FileStatus], muted: egui::Color32) {
-    paint_changes_list(ui, files, muted);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("{} files changed", files.len()))
+                .size(10.0)
+                .color(muted),
+        );
+        let (additions, deletions) = file_totals(files);
+        ui.label(
+            egui::RichText::new(format!("+{}", additions))
+                .size(10.0)
+                .color(egui::Color32::from_rgb(78, 190, 116)),
+        );
+        ui.label(
+            egui::RichText::new(format!("-{}", deletions))
+                .size(10.0)
+                .color(egui::Color32::from_rgb(230, 92, 92)),
+        );
+    });
+    ui.add_space(8.0);
+    if files.is_empty() {
+        ui.label(
+            egui::RichText::new("No file changes")
+                .size(10.0)
+                .color(muted),
+        );
+    } else {
+        paint_changes_list(ui, files, muted);
+    }
+}
+
+fn paint_commit_details(
+    ui: &mut egui::Ui,
+    commit: &CommitDrawerCommit,
+    signature: Option<&CommitDrawerSignature>,
+    files: &[FileStatus],
+    app_state: &AppState,
+    muted: egui::Color32,
+) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                paint_author_avatar(ui, &commit.author, app_state);
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Details").size(11.0).strong());
+                    ui.label(
+                        egui::RichText::new(format!("{} <{}>", commit.author, commit.email))
+                            .size(10.0)
+                            .color(muted),
+                    );
+                });
+            });
+            ui.label(
+                egui::RichText::new(format!("SHA: {}", commit.hash))
+                    .size(10.0)
+                    .color(muted),
+            );
+            ui.label(
+                egui::RichText::new(format!("Parents: {}", commit.parents.join(", ")))
+                    .size(10.0)
+                    .color(muted),
+            );
+            ui.label(
+                egui::RichText::new(format!("When: {}", commit.timestamp_exact))
+                    .size(10.0)
+                    .color(muted),
+            );
+            ui.label(
+                egui::RichText::new(format!("Files changed: {}", files.len()))
+                    .size(10.0)
+                    .color(muted),
+            );
+            let (additions, deletions) = file_totals(files);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Total diff:").size(10.0).color(muted));
+                ui.label(
+                    egui::RichText::new(format!("+{}", additions))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(78, 190, 116)),
+                );
+                ui.label(
+                    egui::RichText::new(format!("-{}", deletions))
+                        .size(10.0)
+                        .color(egui::Color32::from_rgb(230, 92, 92)),
+                );
+            });
+        });
+
+        ui.add_space(18.0);
+
+        ui.vertical(|ui| {
+            ui.set_min_width(280.0);
+            if let Some(sig) = signature {
+                paint_signature_block(ui, sig, muted);
+            } else {
+                ui.group(|ui| {
+                    ui.label(
+                        egui::RichText::new("GPG Signature Details")
+                            .size(10.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new("No signature data")
+                            .size(10.0)
+                            .color(muted),
+                    );
+                });
+            }
+        });
+    });
+}
+
+fn paint_author_avatar(ui: &mut egui::Ui, author: &str, app_state: &AppState) {
+    let size = egui::vec2(28.0, 28.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    if let Some(path) = app_state.avatar_cache.get(author) {
+        let uri = url::Url::from_file_path(path)
+            .map(|u| u.to_string())
+            .unwrap_or_else(|_| format!("file://{}", path));
+        let image = egui::Image::new(uri).corner_radius(2.0);
+        image.paint_at(ui, rect);
+        return;
+    }
+
+    ui.painter()
+        .circle_filled(rect.center(), 14.0, egui::Color32::from_rgb(76, 76, 76));
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        author.chars().next().unwrap_or('?').to_string(),
+        egui::FontId::proportional(14.0),
+        egui::Color32::WHITE,
+    );
+}
+
+fn paint_signature_block(ui: &mut egui::Ui, sig: &CommitDrawerSignature, muted: egui::Color32) {
+    ui.group(|ui| {
+        ui.label(
+            egui::RichText::new("GPG Signature Details")
+                .size(10.0)
+                .strong(),
+        );
+        ui.label(egui::RichText::new(&sig.status).size(10.0).color(muted));
+        if let Some(summary) = &sig.summary {
+            ui.label(egui::RichText::new(summary).size(10.0).color(muted));
+        }
+        if let Some(key_id) = &sig.key_id {
+            ui.label(
+                egui::RichText::new(format!("Key ID: {}", key_id))
+                    .size(10.0)
+                    .color(muted),
+            );
+        }
+        if let Some(trust) = &sig.trust {
+            ui.label(
+                egui::RichText::new(format!("Trust: {}", trust))
+                    .size(10.0)
+                    .color(muted),
+            );
+        }
+    });
+}
+
+fn paint_changes_list(ui: &mut egui::Ui, files: &[FileStatus], _muted: egui::Color32) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for file in files {
+            paint_change_row(ui, file);
+        }
+    });
+}
+
+fn paint_change_row(ui: &mut egui::Ui, file: &FileStatus) {
+    let (icon, icon_color) = file_icon_for_row(&file.kind);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
+        ui.label(egui::RichText::new(icon).size(11.0).color(icon_color));
+        ui.label(egui::RichText::new(&file.path).size(10.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(format!("-{}", file.deletions))
+                    .size(9.0)
+                    .color(egui::Color32::from_rgb(230, 92, 92)),
+            );
+            ui.label(
+                egui::RichText::new(format!("+{}", file.additions))
+                    .size(9.0)
+                    .color(egui::Color32::from_rgb(78, 190, 116)),
+            );
+        });
+    });
+}
+
+fn file_totals(files: &[FileStatus]) -> (usize, usize) {
+    files.iter().fold((0usize, 0usize), |(adds, dels), file| {
+        (adds + file.additions, dels + file.deletions)
+    })
+}
+
+fn file_icon_for_row(kind: &FileChangeKind) -> (&'static str, egui::Color32) {
+    match kind {
+        FileChangeKind::Added => (FILE_PLUS, egui::Color32::from_rgb(78, 190, 116)),
+        FileChangeKind::Modified => (FILE, egui::Color32::from_rgb(252, 197, 34)),
+        FileChangeKind::Deleted => (FILE_TEXT, egui::Color32::from_rgb(230, 92, 92)),
+        FileChangeKind::Renamed => (FILE_TEXT, egui::Color32::from_rgb(151, 113, 255)),
+        FileChangeKind::TypeChanged => (FOLDER, egui::Color32::from_rgb(172, 172, 172)),
+    }
 }
 
 fn paint_tree_tab(
@@ -610,31 +817,4 @@ fn file_icon_by_extension(path: &str) -> &'static str {
         Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("svg") => FILE,
         _ => FILE_TEXT,
     }
-}
-
-fn paint_changes_list(ui: &mut egui::Ui, files: &[FileStatus], muted: egui::Color32) {
-    if files.is_empty() {
-        ui.label(
-            egui::RichText::new("No file changes")
-                .size(10.0)
-                .color(muted),
-        );
-        return;
-    }
-
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for file in files {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("•").size(12.0).color(muted));
-                ui.label(egui::RichText::new(&file.path).size(10.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("+{} -{}", file.additions, file.deletions))
-                            .size(9.0)
-                            .color(muted),
-                    );
-                });
-            });
-        }
-    });
 }

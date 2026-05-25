@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::SystemTime;
 
 use git2::{Repository, Sort, StashFlags, StatusOptions};
 
 use crate::git::error::GitError;
 use crate::git::models::{
-    Branch, Commit, FileChangeKind, FileStatus, Remote, RepoStatus, Stash, Tag,
+    Branch, Commit, CommitSignatureInfo, FileChangeKind, FileStatus, Remote, RepoStatus, Stash, Tag,
 };
 
 pub struct GitRepo {
@@ -117,6 +118,40 @@ impl GitRepo {
         Ok(self.commit_from_git2(&commit))
     }
 
+    pub fn commit_signature_info(
+        &self,
+        hash: &str,
+    ) -> Result<Option<CommitSignatureInfo>, GitError> {
+        let output = Command::new("git")
+            .args(["verify-commit", "--raw", hash])
+            .current_dir(self.repo.workdir().unwrap_or(self.repo.path()))
+            .output()?;
+
+        if !output.status.success() {
+            tracing::debug!(hash = %hash, "Commit signature verification unavailable or failed");
+            return Ok(None);
+        }
+
+        let raw_output = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let parsed = parse_commit_signature_output(&raw_output);
+        if let Some(sig) = parsed.as_ref() {
+            tracing::debug!(
+                hash = %hash,
+                status = %sig.status,
+                key_id = sig.key_id.as_deref().unwrap_or(""),
+                trust = sig.trust.as_deref().unwrap_or(""),
+                "Parsed commit signature metadata"
+            );
+        } else {
+            tracing::debug!(hash = %hash, "No commit signature metadata parsed");
+        }
+        Ok(parsed)
+    }
+
     pub fn commit_files(&self, hash: &str) -> Result<Vec<FileStatus>, GitError> {
         let commit = self.repo.revparse_single(hash)?.peel_to_commit()?;
         let tree = commit.tree()?;
@@ -137,6 +172,44 @@ impl GitRepo {
                 .diff_tree_to_tree(None, Some(&tree), Some(&mut diff_opts))?,
         };
 
+        let mut file_stats: std::collections::HashMap<String, (usize, usize)> =
+            std::collections::HashMap::new();
+        {
+            let mut current_path = String::new();
+            let mut current_adds = 0usize;
+            let mut current_dels = 0usize;
+            diff.print(git2::DiffFormat::Patch, |delta, _hunk, diff_line| {
+                let path = delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())
+                    .and_then(|p| p.to_str())
+                    .map(|s| s.to_string());
+
+                if let Some(p) = path {
+                    if p != current_path && !current_path.is_empty() {
+                        *file_stats.entry(current_path.clone()).or_insert((0, 0)) =
+                            (current_adds, current_dels);
+                    }
+                    if p != current_path {
+                        current_path = p;
+                        current_adds = 0;
+                        current_dels = 0;
+                    }
+                }
+
+                match diff_line.origin() {
+                    '+' => current_adds += 1,
+                    '-' => current_dels += 1,
+                    _ => {}
+                }
+                true
+            })?;
+            if !current_path.is_empty() {
+                *file_stats.entry(current_path).or_insert((0, 0)) = (current_adds, current_dels);
+            }
+        }
+
         let mut files = Vec::new();
         diff.print(git2::DiffFormat::NameStatus, |delta, _hunk, _line| {
             let path = delta
@@ -146,6 +219,7 @@ impl GitRepo {
                 .and_then(|p| p.to_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
+            let stats = file_stats.get(&path).copied().unwrap_or((0, 0));
             let old_path = delta
                 .old_file()
                 .path()
@@ -165,8 +239,8 @@ impl GitRepo {
                 old_path,
                 kind,
                 staged: true,
-                additions: 0,
-                deletions: 0,
+                additions: stats.0,
+                deletions: stats.1,
             });
             true
         })?;
@@ -988,6 +1062,55 @@ impl GitRepo {
     }
 }
 
+fn parse_commit_signature_output(output: &str) -> Option<CommitSignatureInfo> {
+    let mut status = None;
+    let mut summary = None;
+    let mut key_id = None;
+    let mut trust = None;
+
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("[GNUPG:]") {
+            let tokens: Vec<&str> = value.split_whitespace().collect();
+            match tokens.as_slice() {
+                ["GOODSIG", key, _user @ ..] => {
+                    status = Some("GOODSIG".to_string());
+                    key_id = Some((*key).to_string());
+                    summary = Some("Verification completed successfully".to_string());
+                }
+                ["VALIDSIG", key, ..] => {
+                    key_id.get_or_insert_with(|| (*key).to_string());
+                    status = Some("VALIDSIG".to_string());
+                }
+                ["TRUST_ULTIMATE", ..] => trust = Some("ULTIMATE".to_string()),
+                ["TRUST_FULLY", ..] => trust = Some("FULLY".to_string()),
+                ["TRUST_MARGINAL", ..] => trust = Some("MARGINAL".to_string()),
+                ["TRUST_NEVER", ..] => trust = Some("NEVER".to_string()),
+                ["TRUST_UNDEFINED", ..] => trust = Some("UNDEFINED".to_string()),
+                ["TRUST_UNKNOWN", ..] => trust = Some("UNKNOWN".to_string()),
+                ["ERRSIG", ..] => {
+                    status = Some("ERRSIG".to_string());
+                    summary = Some("Signature verification failed".to_string());
+                }
+                ["EXPSIG", ..] => {
+                    status = Some("EXPSIG".to_string());
+                    summary = Some("Signature expired".to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let status = status?;
+    let summary = summary.or_else(|| Some("Verification completed successfully".to_string()));
+    Some(CommitSignatureInfo {
+        status,
+        summary,
+        key_id,
+        trust,
+    })
+}
+
 fn secs_to_system_time(secs: i64) -> SystemTime {
     if secs >= 0 {
         SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs as u64)
@@ -1136,5 +1259,26 @@ mod tests {
         assert!(!branches.iter().any(|b| b.name == "feature-branch"));
 
         std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn parse_commit_signature_output_parses_goodsig() {
+        let output = "[GNUPG:] GOODSIG ABCDEF1234567890ABCDEF1234567890ABCDEF12 Example User <example@invalid>\n[GNUPG:] VALIDSIG ABCDEF1234567890ABCDEF1234567890ABCDEF12 2026-05-25 2026-05-25 0 4 0 1 10 00 0 0 0 0 0\n[GNUPG:] TRUST_ULTIMATE 0 pgp";
+        let parsed = parse_commit_signature_output(output).unwrap();
+        assert_eq!(parsed.status, "VALIDSIG");
+        assert_eq!(
+            parsed.key_id.as_deref(),
+            Some("ABCDEF1234567890ABCDEF1234567890ABCDEF12")
+        );
+        assert_eq!(parsed.trust.as_deref(), Some("ULTIMATE"));
+        assert_eq!(
+            parsed.summary.as_deref(),
+            Some("Verification completed successfully")
+        );
+    }
+
+    #[test]
+    fn parse_commit_signature_output_handles_unsigned() {
+        assert!(parse_commit_signature_output("").is_none());
     }
 }

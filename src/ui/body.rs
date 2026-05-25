@@ -412,6 +412,7 @@ pub struct State {
     selected_commit_hash: Option<String>,
     selected_commit_cache_hash: Option<String>,
     selected_commit_cache: Option<commit_drawer::CommitDrawerCommit>,
+    selected_commit_signature_cache: Option<commit_drawer::CommitDrawerSignature>,
     selected_commit_files_cache: Vec<crate::git::models::FileStatus>,
     drawer_state: commit_drawer::State,
 }
@@ -433,6 +434,7 @@ impl Default for State {
             selected_commit_hash: None,
             selected_commit_cache_hash: None,
             selected_commit_cache: None,
+            selected_commit_signature_cache: None,
             selected_commit_files_cache: Vec::new(),
             drawer_state: commit_drawer::State::default(),
         }
@@ -464,6 +466,7 @@ impl State {
         let Some(hash) = self.selected_commit_hash.as_deref() else {
             self.selected_commit_cache_hash = None;
             self.selected_commit_cache = None;
+            self.selected_commit_signature_cache = None;
             self.selected_commit_files_cache.clear();
             return;
         };
@@ -475,11 +478,21 @@ impl State {
         let Some(commit) = app_state.cached_commits.iter().find(|c| c.hash == hash) else {
             self.selected_commit_cache_hash = None;
             self.selected_commit_cache = None;
+            self.selected_commit_signature_cache = None;
             self.selected_commit_files_cache.clear();
             return;
         };
 
         let full_commit = git_repo.and_then(|repo| repo.commit_by_hash(hash).ok());
+        let signature = git_repo
+            .and_then(|repo| repo.commit_signature_info(hash).ok())
+            .flatten()
+            .map(|sig| commit_drawer::CommitDrawerSignature {
+                status: sig.status,
+                summary: sig.summary,
+                key_id: sig.key_id,
+                trust: sig.trust,
+            });
         let files = git_repo
             .and_then(|repo| repo.commit_files(hash).ok())
             .unwrap_or_default();
@@ -495,8 +508,10 @@ impl State {
                 .map(|c| c.email.clone())
                 .unwrap_or_default(),
             timestamp: crate::ui::repo_manager::format_relative_time(commit.timestamp_secs),
+            timestamp_exact: format_commit_date_from_secs(commit.timestamp_secs),
             parents: commit.parents.clone(),
         });
+        self.selected_commit_signature_cache = signature;
         self.selected_commit_files_cache = files;
     }
 }
@@ -722,6 +737,7 @@ pub fn show_cached(
                 &mut state.drawer_state,
                 app_state,
                 Some(selected),
+                state.selected_commit_signature_cache.as_ref(),
                 &state.selected_commit_files_cache,
             );
         }

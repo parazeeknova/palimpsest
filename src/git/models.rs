@@ -35,6 +35,15 @@ pub struct Commit {
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
+pub struct CommitSignatureInfo {
+    pub status: String,
+    pub summary: Option<String>,
+    pub key_id: Option<String>,
+    pub trust: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
 pub struct Branch {
     pub name: String,
     pub is_current: bool,
