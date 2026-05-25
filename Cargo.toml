@@ -1,6 +1,6 @@
 [package]
 name = "palimpsest"
-version = "0.0.94"
+version = "0.0.96"
 edition = "2024"
 description = "A git history visualizer"
 homepage = "https://github.com/parazeeknova/palimpsest"
@@ -28,6 +28,7 @@ cbc = "0.1.2"
 sha2 = "0.10.9"
 rand = "0.8.6"
 aes-gcm = "0.10.3"
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 
 
 [target.'cfg(target_os = "linux")'.dependencies]

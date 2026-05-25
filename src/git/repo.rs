@@ -18,7 +18,7 @@ impl GitRepo {
     pub fn open(path: &str) -> Result<Self, GitError> {
         tracing::debug!(path = %path, "Attempting to open git repository");
         let repo = Repository::open(path)?;
-        tracing::info!(path = %path, "Git repository opened successfully");
+        tracing::debug!(path = %path, "Git repository opened successfully");
         Ok(Self { repo })
     }
 
@@ -83,7 +83,7 @@ impl GitRepo {
             commits.push(self.commit_from_git2(&commit));
         }
 
-        tracing::info!(count = commits.len(), "Commits fetched");
+        tracing::debug!(count = commits.len(), "Commits fetched");
         Ok(commits)
     }
 
@@ -287,7 +287,7 @@ impl GitRepo {
             });
         }
 
-        tracing::info!(count = branches.len(), "Branches fetched");
+        tracing::debug!(count = branches.len(), "Branches fetched");
         Ok(branches)
     }
 
@@ -306,7 +306,7 @@ impl GitRepo {
             })
             .collect::<Result<Vec<_>, git2::Error>>()?;
 
-        tracing::info!(count = result.len(), "Remotes fetched");
+        tracing::debug!(count = result.len(), "Remotes fetched");
         Ok(result)
     }
 
@@ -347,7 +347,7 @@ impl GitRepo {
             })
             .collect::<Result<Vec<_>, git2::Error>>()?;
 
-        tracing::info!(count = result.len(), "Tags fetched");
+        tracing::debug!(count = result.len(), "Tags fetched");
         Ok(result)
     }
 
@@ -407,7 +407,7 @@ impl GitRepo {
             });
         }
 
-        tracing::info!(count = result.len(), "Tags fetched (limited)");
+        tracing::debug!(count = result.len(), "Tags fetched (limited)");
         Ok(result)
     }
 
@@ -435,7 +435,7 @@ impl GitRepo {
             })
             .collect::<Result<Vec<_>, git2::Error>>()?;
 
-        tracing::info!(count = stashes.len(), "Stashes fetched");
+        tracing::debug!(count = stashes.len(), "Stashes fetched");
         Ok(stashes)
     }
 
@@ -672,7 +672,7 @@ impl GitRepo {
             files_changed,
         };
 
-        tracing::info!(
+        tracing::debug!(
             staged = result.staged_count,
             unstaged = result.unstaged_count,
             "Repository status fetched"

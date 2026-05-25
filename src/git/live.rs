@@ -121,7 +121,7 @@ fn normalize_github_remote(url: &str) -> Option<String> {
     None
 }
 
-fn parse_github_remote(url: &str) -> Option<(String, String)> {
+pub(crate) fn parse_github_remote(url: &str) -> Option<(String, String)> {
     let base = normalize_github_remote(url)?;
     let path = base.strip_prefix("https://github.com/")?;
     let mut parts = path.split('/');
@@ -265,28 +265,33 @@ fn watch_path(watcher: &mut impl Watcher, path: std::path::PathBuf, recursive: R
     let _ = watcher.watch(&path, recursive);
 }
 
+pub struct JobPermit;
+
+impl Drop for JobPermit {
+    fn drop(&mut self) {
+        CONCURRENT_JOBS.fetch_sub(1, Ordering::SeqCst);
+        tracing::debug!("Job permit dropped, slot released");
+    }
+}
+
 use std::sync::atomic::AtomicUsize;
 
 static CONCURRENT_JOBS: AtomicUsize = AtomicUsize::new(0);
 const MAX_CONCURRENT_JOBS: usize = 2;
 
-fn try_acquire_job() -> bool {
+pub fn try_acquire_job() -> Option<JobPermit> {
     loop {
         let current = CONCURRENT_JOBS.load(Ordering::SeqCst);
         if current >= MAX_CONCURRENT_JOBS {
-            return false;
+            return None;
         }
         if CONCURRENT_JOBS
             .compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            return true;
+            return Some(JobPermit);
         }
     }
-}
-
-fn release_job() {
-    CONCURRENT_JOBS.fetch_sub(1, Ordering::SeqCst);
 }
 
 #[derive(Debug, Clone)]
@@ -472,13 +477,33 @@ pub fn spawn_repo_tracker(
         let mut dirty_slices = DirtySlices::default();
 
         // Compute initial fingerprint check
-        let initial_fp = crate::git::cache::compute_repo_fingerprint(&path);
-        let mut last_fingerprint = String::new();
-        if let Some(ref dc) = crate::git::cache::load_cache(&path) {
-            last_fingerprint = dc.repo_fingerprint.clone();
-        }
+        let current_fps = crate::git::cache::compute_repo_fingerprints(&path);
+        let mut stored_fps = crate::git::cache::load_fingerprints(&path).unwrap_or(None);
 
-        if last_fingerprint != initial_fp || current_local.last_refresh.is_none() {
+        if let Some(ref stored) = stored_fps {
+            if current_fps.head != stored.head
+                || current_fps.refs_heads != stored.refs_heads
+                || current_fps.refs_remotes != stored.refs_remotes
+                || current_fps.packed_refs != stored.packed_refs
+            {
+                dirty_slices.refs = true;
+                dirty_slices.commits = true;
+            }
+            if current_fps.refs_tags != stored.refs_tags
+                || current_fps.packed_refs != stored.packed_refs
+            {
+                dirty_slices.tags = true;
+            }
+            if current_fps.config != stored.config
+                || current_fps.refs_remotes != stored.refs_remotes
+            {
+                dirty_slices.remotes = true;
+            }
+            if current_fps.index != stored.index {
+                dirty_slices.status = true;
+            }
+            dirty_slices.stashes = true;
+        } else {
             dirty_slices.mark_all();
         }
 
@@ -494,7 +519,12 @@ pub fn spawn_repo_tracker(
             }
         }
 
+        const ACTIVE_POLL_INTERVAL: Duration = Duration::from_secs(10);
+        const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(60);
+        const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
         let mut last_status_poll = Instant::now();
+        let mut last_activity_time = Instant::now();
         let debounce = Duration::from_millis(250);
         let mut last_event_time = None;
 
@@ -507,17 +537,25 @@ pub fn spawn_repo_tracker(
                 Ok(WatchEvent::PathChanged(p)) => {
                     handle_watch_path(&mut dirty_slices, &p);
                     last_event_time = Some(Instant::now());
+                    last_activity_time = Instant::now();
                 }
                 Ok(WatchEvent::ForceRefresh) => {
                     dirty_slices.mark_all();
                     last_remote_refresh = Instant::now() - remote_poll_interval;
                     last_event_time = None;
+                    last_activity_time = Instant::now();
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
 
-            if last_status_poll.elapsed() >= Duration::from_secs(15) {
+            let current_poll_interval = if last_activity_time.elapsed() < IDLE_TIMEOUT {
+                ACTIVE_POLL_INTERVAL
+            } else {
+                IDLE_POLL_INTERVAL
+            };
+
+            if last_status_poll.elapsed() >= current_poll_interval {
                 dirty_slices.status = true;
                 last_status_poll = Instant::now();
             }
@@ -525,130 +563,144 @@ pub fn spawn_repo_tracker(
             let should_revalidate =
                 dirty_slices.any() && last_event_time.is_none_or(|t| t.elapsed() >= debounce);
 
-            if should_revalidate && try_acquire_job() {
-                tracing::info!(
-                    repo = %path,
-                    commits = dirty_slices.commits,
-                    refs = dirty_slices.refs,
-                    remotes = dirty_slices.remotes,
-                    tags = dirty_slices.tags,
-                    status = dirty_slices.status,
-                    "Starting local git slice revalidation"
-                );
-                let mut changed = false;
-                let mut errors = Vec::new();
+            if should_revalidate {
+                if let Some(_permit) = try_acquire_job() {
+                    tracing::info!(
+                        repo = %path,
+                        commits = dirty_slices.commits,
+                        refs = dirty_slices.refs,
+                        remotes = dirty_slices.remotes,
+                        tags = dirty_slices.tags,
+                        status = dirty_slices.status,
+                        "Starting local git slice revalidation"
+                    );
+                    let mut changed = false;
+                    let mut errors = Vec::new();
 
-                if dirty_slices.commits {
-                    match collect_commits_window(&repo) {
-                        Ok(c) => {
-                            current_local.commits = c;
-                            changed = true;
+                    if dirty_slices.commits {
+                        match collect_commits_window(&repo) {
+                            Ok(c) => {
+                                if current_local.commits != c {
+                                    current_local.commits = c;
+                                    changed = true;
+                                }
+                            }
+                            Err(e) => errors.push(format!("Commits: {e}")),
                         }
-                        Err(e) => errors.push(format!("Commits: {e}")),
                     }
-                }
-                if dirty_slices.refs {
-                    match collect_refs_summary(&repo) {
-                        Ok(b) => {
-                            current_local.branches = b;
-                            changed = true;
+                    if dirty_slices.refs {
+                        match collect_refs_summary(&repo) {
+                            Ok(b) => {
+                                if current_local.branches != b {
+                                    current_local.branches = b;
+                                    changed = true;
+                                }
+                            }
+                            Err(e) => errors.push(format!("Branches: {e}")),
                         }
-                        Err(e) => errors.push(format!("Branches: {e}")),
                     }
-                }
-                if dirty_slices.remotes {
-                    match collect_remotes(&repo) {
-                        Ok(r) => {
-                            current_local.remotes = r;
-                            current_local.ownership = classify_repo_ownership(
-                                &current_local.remotes,
-                                github_login.as_deref(),
-                            );
-                            changed = true;
+                    if dirty_slices.remotes {
+                        match collect_remotes(&repo) {
+                            Ok(r) => {
+                                if current_local.remotes != r {
+                                    current_local.remotes = r;
+                                    current_local.ownership = classify_repo_ownership(
+                                        &current_local.remotes,
+                                        github_login.as_deref(),
+                                    );
+                                    changed = true;
+                                }
+                            }
+                            Err(e) => errors.push(format!("Remotes: {e}")),
                         }
-                        Err(e) => errors.push(format!("Remotes: {e}")),
                     }
-                }
-                if dirty_slices.tags {
-                    match collect_tags_summary(&repo) {
-                        Ok(t) => {
-                            current_local.tags = t;
-                            changed = true;
+                    if dirty_slices.tags {
+                        match collect_tags_summary(&repo) {
+                            Ok(t) => {
+                                if current_local.tags != t {
+                                    current_local.tags = t;
+                                    changed = true;
+                                }
+                            }
+                            Err(e) => errors.push(format!("Tags: {e}")),
                         }
-                        Err(e) => errors.push(format!("Tags: {e}")),
                     }
-                }
-                if dirty_slices.stashes {
-                    match collect_stashes_summary(&repo) {
-                        Ok(s) => {
-                            current_local.stashes = s;
-                            changed = true;
+                    if dirty_slices.stashes {
+                        match collect_stashes_summary(&repo) {
+                            Ok(s) => {
+                                if current_local.stashes != s {
+                                    current_local.stashes = s;
+                                    changed = true;
+                                }
+                            }
+                            Err(e) => errors.push(format!("Stashes: {e}")),
                         }
-                        Err(e) => errors.push(format!("Stashes: {e}")),
                     }
-                }
-                if dirty_slices.status {
-                    match collect_status_summary(&repo) {
-                        Ok(s) => {
-                            current_local.status = s;
-                            changed = true;
+                    if dirty_slices.status {
+                        match collect_status_summary(&repo) {
+                            Ok(s) => {
+                                if current_local.status != s {
+                                    current_local.status = s;
+                                    changed = true;
+                                }
+                            }
+                            Err(e) => errors.push(format!("Status: {e}")),
                         }
-                        Err(e) => errors.push(format!("Status: {e}")),
                     }
-                }
 
-                if changed {
-                    current_local.repo_error = if errors.is_empty() {
-                        None
+                    let new_fps = crate::git::cache::compute_repo_fingerprints(&path);
+                    let fps_changed = if let Some(ref stored) = stored_fps {
+                        *stored != new_fps
                     } else {
-                        Some(errors.join("; "))
+                        true
                     };
-                    current_local.last_refresh = Some(now_millis());
 
-                    let _ = tx.send(RepoLiveEvent::Local {
-                        path: path.clone(),
-                        generation,
-                        snapshot: current_local.clone(),
-                    });
-                    ctx.request_repaint();
+                    if changed {
+                        current_local.repo_error = if errors.is_empty() {
+                            None
+                        } else {
+                            Some(errors.join("; "))
+                        };
+                        current_local.last_refresh = Some(now_millis());
 
-                    let new_fp = crate::git::cache::compute_repo_fingerprint(&path);
-                    let dc = crate::git::cache::DiskCache {
-                        schema_version: crate::git::cache::SCHEMA_VERSION,
-                        repo_path: path.clone(),
-                        repo_fingerprint: new_fp,
-                        captured_at: now_millis(),
-                        local_snapshot: crate::git::cache::BoundedLocalSnapshot::from_snapshot(
-                            &current_local,
-                        ),
-                        remote_snapshot: cached_remote.clone(),
-                        prs_etag: prs_etag.clone(),
-                        actions_etag: actions_etag.clone(),
-                        releases_etag: releases_etag.clone(),
-                        packages_container_etag: packages_container_etag.clone(),
-                        packages_npm_etag: packages_npm_etag.clone(),
-                        prs_fetched_at: None,
-                        actions_fetched_at: None,
-                        releases_fetched_at: None,
-                        packages_container_fetched_at: None,
-                        packages_npm_fetched_at: None,
-                        prs_error: None,
-                        actions_error: None,
-                        releases_error: None,
-                        packages_error: None,
-                    };
-                    let _ = crate::git::cache::save_cache(&dc);
+                        let _ = tx.send(RepoLiveEvent::Local {
+                            path: path.clone(),
+                            generation,
+                            snapshot: current_local.clone(),
+                        });
+                        ctx.request_repaint();
+
+                        let dc = crate::git::cache::DiskCache {
+                            schema_version: crate::git::cache::SCHEMA_VERSION,
+                            repo_path: path.clone(),
+                            repo_fingerprint: String::new(),
+                            captured_at: now_millis(),
+                            local_snapshot: crate::git::cache::BoundedLocalSnapshot::from_snapshot(
+                                &current_local,
+                            ),
+                            remote_snapshot: cached_remote.clone(),
+                            prs_etag: prs_etag.clone(),
+                            actions_etag: actions_etag.clone(),
+                            releases_etag: releases_etag.clone(),
+                            packages_container_etag: packages_container_etag.clone(),
+                            packages_npm_etag: packages_npm_etag.clone(),
+                        };
+                        let _ = crate::git::cache::save_cache(&dc);
+                        stored_fps = Some(new_fps);
+                    } else if fps_changed {
+                        let _ = crate::git::cache::save_fingerprints(&path, &new_fps);
+                        stored_fps = Some(new_fps);
+                    }
+
+                    if !errors.is_empty() {
+                        tracing::warn!(repo = %path, errors = ?errors, "Local slice revalidation completed with errors");
+                    } else if changed {
+                        tracing::info!(repo = %path, "Local slice revalidation completed successfully");
+                    }
+
+                    dirty_slices.clear();
+                    last_event_time = None;
                 }
-
-                if !errors.is_empty() {
-                    tracing::warn!(repo = %path, errors = ?errors, "Local slice revalidation completed with errors");
-                } else if changed {
-                    tracing::info!(repo = %path, "Local slice revalidation completed successfully");
-                }
-
-                dirty_slices.clear();
-                last_event_time = None;
-                release_job();
             }
 
             if last_remote_refresh.elapsed() >= remote_poll_interval
@@ -661,7 +713,7 @@ pub fn spawn_repo_tracker(
                         .iter()
                         .find_map(|r| parse_github_remote(&r.url))
                     {
-                        if try_acquire_job() {
+                        if let Some(_permit) = try_acquire_job() {
                             tracing::info!(repo = %repo_name, owner = %owner, "Triggered GitHub remote metadata sync");
                             let mut remote_changed = false;
                             let mut errors = Vec::new();
@@ -883,15 +935,6 @@ pub fn spawn_repo_tracker(
                                     releases_etag: releases_etag.clone(),
                                     packages_container_etag: packages_container_etag.clone(),
                                     packages_npm_etag: packages_npm_etag.clone(),
-                                    prs_fetched_at: None,
-                                    actions_fetched_at: None,
-                                    releases_fetched_at: None,
-                                    packages_container_fetched_at: None,
-                                    packages_npm_fetched_at: None,
-                                    prs_error: None,
-                                    actions_error: None,
-                                    releases_error: None,
-                                    packages_error: None,
                                 };
                                 let _ = crate::git::cache::save_cache(&dc);
                             }
@@ -905,7 +948,6 @@ pub fn spawn_repo_tracker(
                             }
 
                             last_remote_refresh = Instant::now();
-                            release_job();
                         }
                     }
                 }
@@ -965,13 +1007,15 @@ mod tests {
     fn test_concurrency_limit() {
         // Reset job slot counter before running test
         CONCURRENT_JOBS.store(0, Ordering::SeqCst);
-        assert!(try_acquire_job());
-        assert!(try_acquire_job());
-        assert!(!try_acquire_job());
-        release_job();
-        assert!(try_acquire_job());
-        release_job();
-        release_job();
+        let permit1 = try_acquire_job();
+        assert!(permit1.is_some());
+        let permit2 = try_acquire_job();
+        assert!(permit2.is_some());
+        let permit3 = try_acquire_job();
+        assert!(permit3.is_none());
+        drop(permit1);
+        let permit4 = try_acquire_job();
+        assert!(permit4.is_some());
     }
 
     #[test]
