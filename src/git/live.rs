@@ -508,6 +508,15 @@ pub fn spawn_repo_tracker(
 
         tracing::debug!(repo = %path, "Live tracker watching repository paths");
 
+        let mut pending_full_save = false;
+        let mut pending_status_save = false;
+        let mut pending_commits_save = false;
+        let mut pending_refs_save = false;
+        let mut pending_remotes_save = false;
+        let mut pending_tags_save = false;
+        let mut pending_stashes_save = false;
+        let mut pending_fingerprints_save = false;
+
         let mut dirty_slices = DirtySlices::default();
 
         // Compute initial fingerprint check
@@ -608,14 +617,25 @@ pub fn spawn_repo_tracker(
                         status = dirty_slices.status,
                         "Starting local git slice revalidation"
                     );
-                    let mut changed = false;
+                    let mut status_changed = pending_status_save;
+                    let mut commits_changed = pending_commits_save;
+                    let mut refs_changed = pending_refs_save;
+                    let mut remotes_changed = pending_remotes_save;
+                    let mut tags_changed = pending_tags_save;
+                    let mut stashes_changed = pending_stashes_save;
+
+                    let mut changed = status_changed
+                        || commits_changed
+                        || refs_changed
+                        || remotes_changed
+                        || tags_changed
+                        || stashes_changed;
                     let mut errors = Vec::new();
-                    let mut status_changed = false;
-                    let mut commits_changed = false;
-                    let mut refs_changed = false;
-                    let mut remotes_changed = false;
-                    let mut tags_changed = false;
-                    let mut stashes_changed = false;
+
+                    let force_full_save = pending_full_save || stored_fps.is_none();
+                    if force_full_save {
+                        changed = true;
+                    }
 
                     if dirty_slices.commits {
                         match collect_commits_window(&repo) {
@@ -716,7 +736,8 @@ pub fn spawn_repo_tracker(
                         });
                         ctx.request_repaint();
 
-                        if stored_fps.is_none() {
+                        let mut all_succeeded = true;
+                        if force_full_save {
                             let dc = crate::git::cache::DiskCache {
                                 schema_version: crate::git::cache::SCHEMA_VERSION,
                                 repo_path: path.clone(),
@@ -733,55 +754,128 @@ pub fn spawn_repo_tracker(
                                 packages_container_etag: packages_container_etag.clone(),
                                 packages_npm_etag: packages_npm_etag.clone(),
                             };
-                            let _ = crate::git::cache::save_cache(&dc, github_login.as_deref());
+                            match crate::git::cache::save_cache(&dc, github_login.as_deref()) {
+                                Ok(()) => {
+                                    pending_full_save = false;
+                                }
+                                Err(err) => {
+                                    tracing::warn!(repo = %path, err = %err, "Failed to save repository cache to SQLite");
+                                    pending_full_save = true;
+                                    all_succeeded = false;
+                                }
+                            }
                         } else {
                             if status_changed {
-                                let _ = crate::git::cache::save_status_slice(
+                                match crate::git::cache::save_status_slice(
                                     &path,
                                     &current_local.status,
                                     &new_fps,
-                                );
+                                ) {
+                                    Ok(()) => {
+                                        pending_status_save = false;
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(repo = %path, err = %err, "Failed to save status slice to SQLite");
+                                        pending_status_save = true;
+                                        all_succeeded = false;
+                                    }
+                                }
                             }
                             if commits_changed {
-                                let _ = crate::git::cache::save_commits_slice(
+                                match crate::git::cache::save_commits_slice(
                                     &path,
                                     &current_local.commits,
                                     &new_fps,
-                                );
+                                ) {
+                                    Ok(()) => {
+                                        pending_commits_save = false;
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(repo = %path, err = %err, "Failed to save commits slice to SQLite");
+                                        pending_commits_save = true;
+                                        all_succeeded = false;
+                                    }
+                                }
                             }
                             if refs_changed {
-                                let _ = crate::git::cache::save_refs_slice(
+                                match crate::git::cache::save_refs_slice(
                                     &path,
                                     &current_local.branches,
                                     &new_fps,
-                                );
+                                ) {
+                                    Ok(()) => {
+                                        pending_refs_save = false;
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(repo = %path, err = %err, "Failed to save refs slice to SQLite");
+                                        pending_refs_save = true;
+                                        all_succeeded = false;
+                                    }
+                                }
                             }
                             if remotes_changed {
-                                let _ = crate::git::cache::save_remotes_slice(
+                                match crate::git::cache::save_remotes_slice(
                                     &path,
                                     &current_local.remotes,
                                     &new_fps,
-                                );
+                                ) {
+                                    Ok(()) => {
+                                        pending_remotes_save = false;
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(repo = %path, err = %err, "Failed to save remotes slice to SQLite");
+                                        pending_remotes_save = true;
+                                        all_succeeded = false;
+                                    }
+                                }
                             }
                             if tags_changed {
-                                let _ = crate::git::cache::save_tags_slice(
+                                match crate::git::cache::save_tags_slice(
                                     &path,
                                     &current_local.tags,
                                     &new_fps,
-                                );
+                                ) {
+                                    Ok(()) => {
+                                        pending_tags_save = false;
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(repo = %path, err = %err, "Failed to save tags slice to SQLite");
+                                        pending_tags_save = true;
+                                        all_succeeded = false;
+                                    }
+                                }
                             }
                             if stashes_changed {
-                                let _ = crate::git::cache::save_stashes_slice(
+                                match crate::git::cache::save_stashes_slice(
                                     &path,
                                     &current_local.stashes,
                                     &new_fps,
-                                );
+                                ) {
+                                    Ok(()) => {
+                                        pending_stashes_save = false;
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(repo = %path, err = %err, "Failed to save stashes slice to SQLite");
+                                        pending_stashes_save = true;
+                                        all_succeeded = false;
+                                    }
+                                }
                             }
                         }
-                        stored_fps = Some(new_fps);
-                    } else if fps_changed {
-                        let _ = crate::git::cache::save_fingerprints(&path, &new_fps);
-                        stored_fps = Some(new_fps);
+                        if all_succeeded {
+                            stored_fps = Some(new_fps);
+                        }
+                    } else if fps_changed || pending_fingerprints_save {
+                        match crate::git::cache::save_fingerprints(&path, &new_fps) {
+                            Ok(()) => {
+                                pending_fingerprints_save = false;
+                                stored_fps = Some(new_fps);
+                            }
+                            Err(err) => {
+                                tracing::warn!(repo = %path, err = %err, "Failed to save fingerprints to SQLite");
+                                pending_fingerprints_save = true;
+                            }
+                        }
                     }
 
                     if !errors.is_empty() {
@@ -1046,12 +1140,22 @@ pub fn spawn_repo_tracker(
 
                             if should_dispatch {
                                 if let Some(ref r) = cached_remote {
-                                    let _ = tx.send(RepoLiveEvent::Remote {
+                                    match tx.send(RepoLiveEvent::Remote {
                                         path: path.clone(),
                                         generation,
                                         snapshot: r.clone(),
-                                    });
-                                    ctx.request_repaint();
+                                    }) {
+                                        Ok(()) => {
+                                            ctx.request_repaint();
+                                        }
+                                        Err(err) => {
+                                            tracing::debug!(
+                                                repo = %path,
+                                                err = %err,
+                                                "Failed to send remote live event (receiver closed or shutting down)"
+                                            );
+                                        }
+                                    }
                                 }
 
                                 let new_fp = crate::git::cache::compute_repo_fingerprint(&path);
@@ -1071,7 +1175,12 @@ pub fn spawn_repo_tracker(
                                     packages_container_etag: packages_container_etag.clone(),
                                     packages_npm_etag: packages_npm_etag.clone(),
                                 };
-                                let _ = crate::git::cache::save_cache(&dc, github_login.as_deref());
+                                if let Err(err) =
+                                    crate::git::cache::save_cache(&dc, github_login.as_deref())
+                                {
+                                    tracing::warn!(repo = %path, err = %err, "Failed to save repository cache after remote sync to SQLite");
+                                    pending_full_save = true;
+                                }
                             }
 
                             if !errors.is_empty() {
