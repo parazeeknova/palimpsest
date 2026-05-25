@@ -391,7 +391,7 @@ pub fn show(
                                             ))
                                             .size(12.0),
                                         )
-                                        .shortcut_text("Ctrl+Shift+L")
+                                        .shortcut_text("Ctrl+Shift+U")
                                         .frame(false),
                                     )
                                     .clicked()

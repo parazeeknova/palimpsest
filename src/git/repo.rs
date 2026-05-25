@@ -122,15 +122,19 @@ impl GitRepo {
         &self,
         hash: &str,
     ) -> Result<Option<CommitSignatureInfo>, GitError> {
-        let output = Command::new("git")
+        let output = match Command::new("git")
             .args(["verify-commit", "--raw", hash])
             .current_dir(self.repo.workdir().unwrap_or(self.repo.path()))
-            .output()?;
-
-        if !output.status.success() {
-            tracing::debug!(hash = %hash, "Commit signature verification unavailable or failed");
-            return Ok(None);
-        }
+            .output()
+        {
+            Ok(out) => out,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    return Ok(None);
+                }
+                return Err(GitError::from(e));
+            }
+        };
 
         let raw_output = format!(
             "{}\n{}",

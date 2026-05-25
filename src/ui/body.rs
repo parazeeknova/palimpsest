@@ -411,6 +411,7 @@ pub struct State {
     top_status_row: Option<TopStatusRow>,
     selected_commit_hash: Option<String>,
     selected_commit_cache_hash: Option<String>,
+    selected_commit_cache_populated_with_repo: bool,
     selected_commit_cache: Option<commit_drawer::CommitDrawerCommit>,
     selected_commit_signature_cache: Option<commit_drawer::CommitDrawerSignature>,
     selected_commit_files_cache: Vec<crate::git::models::FileStatus>,
@@ -433,6 +434,7 @@ impl Default for State {
             top_status_row: None,
             selected_commit_hash: None,
             selected_commit_cache_hash: None,
+            selected_commit_cache_populated_with_repo: false,
             selected_commit_cache: None,
             selected_commit_signature_cache: None,
             selected_commit_files_cache: Vec::new(),
@@ -468,18 +470,23 @@ impl State {
             self.selected_commit_cache = None;
             self.selected_commit_signature_cache = None;
             self.selected_commit_files_cache.clear();
+            self.selected_commit_cache_populated_with_repo = false;
             return;
         };
 
-        if self.selected_commit_cache_hash.as_deref() == Some(hash) {
+        if self.selected_commit_cache_hash.as_deref() == Some(hash)
+            && self.selected_commit_cache_populated_with_repo == git_repo.is_some()
+        {
             return;
         }
 
         let Some(commit) = app_state.cached_commits.iter().find(|c| c.hash == hash) else {
+            self.selected_commit_hash = None;
             self.selected_commit_cache_hash = None;
             self.selected_commit_cache = None;
             self.selected_commit_signature_cache = None;
             self.selected_commit_files_cache.clear();
+            self.selected_commit_cache_populated_with_repo = false;
             return;
         };
 
@@ -498,6 +505,7 @@ impl State {
             .unwrap_or_default();
 
         self.selected_commit_cache_hash = Some(hash.to_string());
+        self.selected_commit_cache_populated_with_repo = git_repo.is_some();
         self.selected_commit_cache = Some(commit_drawer::CommitDrawerCommit {
             hash: commit.hash.clone(),
             short_hash: commit.short_hash.clone(),

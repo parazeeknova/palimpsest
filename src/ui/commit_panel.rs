@@ -101,6 +101,12 @@ pub fn show_cached_with_bottom_offset(
         panel_rect = panel_rect.translate(egui::vec2(0.0, -bottom_offset));
     }
 
+    let allowed_top = body_rect.top();
+    if panel_rect.top() < allowed_top {
+        let diff = allowed_top - panel_rect.top();
+        panel_rect = panel_rect.translate(egui::vec2(0.0, diff));
+    }
+
     render_panel_cached(ui, panel_rect, state, &header_text, app_state);
 }
 

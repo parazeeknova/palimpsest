@@ -349,6 +349,8 @@ fn handle_watch_path(dirty: &mut DirtySlices, path: &std::path::Path) {
         dirty.remotes = true;
     } else if filename == "config" {
         dirty.remotes = true;
+    } else if filename == "stash" {
+        dirty.stashes = true;
     } else {
         let path_str = path.to_string_lossy();
         if path_str.contains("refs/heads") || path_str.contains("refs/remotes") {
@@ -356,6 +358,8 @@ fn handle_watch_path(dirty: &mut DirtySlices, path: &std::path::Path) {
             dirty.commits = true;
         } else if path_str.contains("refs/tags") {
             dirty.tags = true;
+        } else if path_str.contains("refs/stash") {
+            dirty.stashes = true;
         }
     }
 }
@@ -386,6 +390,11 @@ fn watch_repo_paths(watcher: &mut impl Watcher, repo: &GitRepo) {
         RecursiveMode::Recursive,
     );
     watch_path(watcher, git_dir.join("refs/tags"), RecursiveMode::Recursive);
+    watch_path(
+        watcher,
+        git_dir.join("refs/stash"),
+        RecursiveMode::Recursive,
+    );
 }
 
 fn handle_github_304(
@@ -721,12 +730,14 @@ pub fn spawn_repo_tracker(
                         true
                     };
 
-                    if changed {
-                        current_local.repo_error = if errors.is_empty() {
-                            None
-                        } else {
-                            Some(errors.join("; "))
-                        };
+                    let new_error = if errors.is_empty() {
+                        None
+                    } else {
+                        Some(errors.join("; "))
+                    };
+
+                    if changed || new_error != current_local.repo_error {
+                        current_local.repo_error = new_error;
                         current_local.last_refresh = Some(now_millis());
 
                         let _ = tx.send(RepoLiveEvent::Local {
@@ -929,11 +940,9 @@ pub fn spawn_repo_tracker(
                                             draft: pr.draft,
                                         })
                                         .collect();
-                                    if let Some(ref mut r) = cached_remote {
-                                        r.pull_requests = prs;
-                                    } else {
+                                    if cached_remote.is_none() {
                                         cached_remote = Some(RepoRemoteSnapshot {
-                                            pull_requests: prs,
+                                            pull_requests: Vec::new(),
                                             action_runs: Vec::new(),
                                             releases: Vec::new(),
                                             packages: Vec::new(),
@@ -941,6 +950,9 @@ pub fn spawn_repo_tracker(
                                             last_refresh: Some(now_millis()),
                                             ownership: RepoOwnership::Owned,
                                         });
+                                    }
+                                    if let Some(ref mut r) = cached_remote {
+                                        r.pull_requests = prs;
                                     }
                                     remote_changed = true;
                                 }
@@ -977,6 +989,17 @@ pub fn spawn_repo_tracker(
                                             head_branch: run.head_branch,
                                         })
                                         .collect();
+                                    if cached_remote.is_none() {
+                                        cached_remote = Some(RepoRemoteSnapshot {
+                                            pull_requests: Vec::new(),
+                                            action_runs: Vec::new(),
+                                            releases: Vec::new(),
+                                            packages: Vec::new(),
+                                            github_error: None,
+                                            last_refresh: Some(now_millis()),
+                                            ownership: RepoOwnership::Owned,
+                                        });
+                                    }
                                     if let Some(ref mut r) = cached_remote {
                                         r.action_runs = runs;
                                     }
@@ -1015,6 +1038,17 @@ pub fn spawn_repo_tracker(
                                             prerelease: rel.prerelease,
                                         })
                                         .collect();
+                                    if cached_remote.is_none() {
+                                        cached_remote = Some(RepoRemoteSnapshot {
+                                            pull_requests: Vec::new(),
+                                            action_runs: Vec::new(),
+                                            releases: Vec::new(),
+                                            packages: Vec::new(),
+                                            github_error: None,
+                                            last_refresh: Some(now_millis()),
+                                            ownership: RepoOwnership::Owned,
+                                        });
+                                    }
                                     if let Some(ref mut r) = cached_remote {
                                         r.releases = rels;
                                     }
@@ -1114,6 +1148,17 @@ pub fn spawn_repo_tracker(
                                     }
 
                                     if container_changed || npm_changed {
+                                        if cached_remote.is_none() {
+                                            cached_remote = Some(RepoRemoteSnapshot {
+                                                pull_requests: Vec::new(),
+                                                action_runs: Vec::new(),
+                                                releases: Vec::new(),
+                                                packages: Vec::new(),
+                                                github_error: None,
+                                                last_refresh: Some(now_millis()),
+                                                ownership: RepoOwnership::Owned,
+                                            });
+                                        }
                                         if let Some(ref mut r) = cached_remote {
                                             r.packages = pkgs;
                                         }
@@ -1126,15 +1171,19 @@ pub fn spawn_repo_tracker(
                             // We intentionally do NOT dispatch a RepoLiveEvent::Remote or save the cache on pure 304 refreshes.
                             // This prevents unnecessary UI repaints since the UI does not display freshness timestamps,
                             // avoiding expensive redraw loops when no visual data has actually changed.
+                            let old_error =
+                                cached_remote.as_ref().and_then(|r| r.github_error.clone());
+                            let new_error = if errors.is_empty() {
+                                None
+                            } else {
+                                Some(errors.join(", "))
+                            };
+                            let error_changed = old_error != new_error;
                             let error_cleared = had_in_memory_error && errors.is_empty();
-                            let should_dispatch = remote_changed || error_cleared;
+                            let should_dispatch = remote_changed || error_cleared || error_changed;
 
                             if let Some(ref mut r) = cached_remote {
-                                r.github_error = if errors.is_empty() {
-                                    None
-                                } else {
-                                    Some(errors.join(", "))
-                                };
+                                r.github_error = new_error;
                                 r.last_refresh = Some(now_millis());
                             }
 

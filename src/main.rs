@@ -446,7 +446,24 @@ impl PalimpsestApp {
                 });
                 self.store
                     .dispatch(AppAction::SetGitHubError(remote.github_error.clone()));
+            } else {
+                self.store.dispatch(AppAction::SetGitHubData {
+                    pull_requests: Vec::new(),
+                    action_runs: Vec::new(),
+                    releases: Vec::new(),
+                    packages: Vec::new(),
+                });
+                self.store.dispatch(AppAction::SetGitHubError(None));
             }
+        } else {
+            self.current_repo_owned_by_authed_user = None;
+            self.store.dispatch(AppAction::SetGitHubData {
+                pull_requests: Vec::new(),
+                action_runs: Vec::new(),
+                releases: Vec::new(),
+                packages: Vec::new(),
+            });
+            self.store.dispatch(AppAction::SetGitHubError(None));
         }
     }
 
@@ -1066,6 +1083,7 @@ impl PalimpsestApp {
             // Spawn background task for history stats to refresh details lazily
             let store = self.store.clone();
             let path_str = path.to_string();
+            let ctx = self.egui_ctx.clone();
             std::thread::spawn(move || {
                 if let Ok(repo) = GitRepo::open(&path_str) {
                     if let Ok((total_commits, oldest_commit)) = repo.history_stats() {
@@ -1082,6 +1100,7 @@ impl PalimpsestApp {
                                 details.total_commits = total_commits;
                                 details.initial_commit_date = initial_date;
                                 store.dispatch(AppAction::SetManagerDetails(Some(details)));
+                                ctx.request_repaint();
                             }
                         }
                     }
@@ -1218,6 +1237,7 @@ impl PalimpsestApp {
                 // Spawn background task for history stats
                 let store = self.store.clone();
                 let path_str = path.to_string();
+                let ctx = self.egui_ctx.clone();
                 std::thread::spawn(move || {
                     if let Ok(repo) = GitRepo::open(&path_str) {
                         if let Ok((total_commits, oldest_commit)) = repo.history_stats() {
@@ -1234,6 +1254,7 @@ impl PalimpsestApp {
                                     details.total_commits = total_commits;
                                     details.initial_commit_date = initial_date;
                                     store.dispatch(AppAction::SetManagerDetails(Some(details)));
+                                    ctx.request_repaint();
                                 }
                             }
                         }
@@ -1277,6 +1298,7 @@ impl PalimpsestApp {
 
         let store = self.store.clone();
         let details_clone = details.clone();
+        let ctx = self.egui_ctx.clone();
 
         tracing::debug!("Triggering background GitHub metadata fetch for {owner}/{repo}");
 
@@ -1292,6 +1314,7 @@ impl PalimpsestApp {
                     updated.is_org = Some(meta.is_org);
                     updated.is_private = Some(meta.is_private);
                     store.dispatch(AppAction::SetManagerDetails(Some(updated)));
+                    ctx.request_repaint();
                 }
                 Err(e) => {
                     tracing::warn!("Failed to fetch repo metadata for {owner}/{repo}: {e}");
@@ -1299,6 +1322,7 @@ impl PalimpsestApp {
                     updated.is_org = None;
                     updated.is_private = None;
                     store.dispatch(AppAction::SetManagerDetails(Some(updated)));
+                    ctx.request_repaint();
                 }
             }
         });
@@ -2015,7 +2039,7 @@ impl eframe::App for PalimpsestApp {
             let fetch_shortcut =
                 egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::F);
             let pull_shortcut =
-                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::L);
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::U);
             let push_shortcut =
                 egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::P);
             let save_stash_shortcut =
@@ -2448,22 +2472,26 @@ impl eframe::App for PalimpsestApp {
                 let path = self.clone_dir.trim().to_string();
                 let store = self.store.clone();
                 let pending_open = self.pending_open_repo.clone();
+                let ctx = ui.ctx().clone();
 
                 std::thread::spawn(move || {
                     store.dispatch(AppAction::SetRepoError(Some(
                         "Cloning repository...".to_string(),
                     )));
+                    ctx.request_repaint();
                     match git2::Repository::clone(&url, &path) {
                         Ok(_) => {
                             store.dispatch(AppAction::SetRepoError(None));
                             let mut guard = pending_open.lock().unwrap();
                             *guard = Some(path);
+                            ctx.request_repaint();
                         }
                         Err(e) => {
                             store.dispatch(AppAction::SetRepoError(Some(format!(
                                 "Failed to clone repository: {}",
                                 e
                             ))));
+                            ctx.request_repaint();
                         }
                     }
                 });
@@ -2650,19 +2678,8 @@ impl eframe::App for PalimpsestApp {
                 } else {
                     Some(message)
                 };
-                if let Some(repo) = &self.git_repo {
-                    match repo.stash_save(msg_opt.as_deref()) {
-                        Ok(_) => {
-                            self.refresh_git_data();
-                        }
-                        Err(e) => {
-                            self.store.dispatch(AppAction::SetRepoError(Some(format!(
-                                "Failed to save stash: {}",
-                                e
-                            ))));
-                        }
-                    }
-                }
+                let ctx = ui.ctx().clone();
+                self.handle_stash_action(StashAction::Save(msg_opt), &ctx);
                 close_dialog = true;
             }
 

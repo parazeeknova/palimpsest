@@ -106,8 +106,10 @@ pub fn open_conn() -> Result<rusqlite::Connection, String> {
     };
     let conn = rusqlite::Connection::open(&db_path).map_err(|e| e.to_string())?;
 
-    let _ = conn.execute("PRAGMA journal_mode = WAL", []);
-    let _ = conn.execute("PRAGMA foreign_keys = ON", []);
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| format!("Failed setting PRAGMA journal_mode: {}", e))?;
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|e| format!("Failed enabling foreign_keys: {}", e))?;
 
     migrate(&conn).map_err(|e| e.to_string())?;
     Ok(conn)
@@ -982,6 +984,12 @@ pub fn save_github_cache_entry(
     let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
 
     tx.execute(
+        "UPDATE repos SET last_seen = ? WHERE id = ?",
+        (fetched_at as i64, repo_id),
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute(
         "INSERT OR REPLACE INTO github_cache (repo_id, auth_login, endpoint, etag, fetched_at, error, payload_json)
          VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
@@ -1009,6 +1017,12 @@ pub fn touch_github_cache_entry(
     let mut conn = open_conn()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let repo_id = get_or_create_repo(&tx, repo_path).map_err(|e| e.to_string())?;
+
+    tx.execute(
+        "UPDATE repos SET last_seen = ? WHERE id = ?",
+        (fetched_at as i64, repo_id),
+    )
+    .map_err(|e| e.to_string())?;
 
     if clear_error {
         tx.execute(
@@ -1598,7 +1612,37 @@ pub fn compute_repo_fingerprint(repo_path: &str) -> String {
 pub fn compute_repo_fingerprints(repo_path: &str) -> RepoFingerprints {
     let git_dir = Path::new(repo_path).join(".git");
     let actual_git_dir = if git_dir.exists() {
-        git_dir
+        if git_dir.is_file() {
+            match std::fs::read_to_string(&git_dir) {
+                Ok(content) => {
+                    let mut resolved = None;
+                    for line in content.lines() {
+                        let line = line.trim();
+                        if let Some(path_str) = line.strip_prefix("gitdir:") {
+                            let rel_path = path_str.trim();
+                            let parsed_path = Path::new(rel_path);
+                            let abs_path = if parsed_path.is_absolute() {
+                                parsed_path.to_path_buf()
+                            } else {
+                                Path::new(repo_path).join(parsed_path)
+                            };
+                            resolved = Some(abs_path);
+                            break;
+                        }
+                    }
+                    if let Some(abs_path) = resolved {
+                        abs_path
+                    } else {
+                        return RepoFingerprints::default();
+                    }
+                }
+                Err(_) => {
+                    return RepoFingerprints::default();
+                }
+            }
+        } else {
+            git_dir
+        }
     } else {
         let alt = Path::new(repo_path);
         if alt.join("HEAD").exists() {
