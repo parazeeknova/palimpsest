@@ -373,6 +373,17 @@ fn parse_kind(s: &str) -> FileChangeKind {
     }
 }
 
+fn extract_endpoint_error(aggregate: &str, prefixes: &[&str]) -> Option<String> {
+    for part in aggregate.split(", ") {
+        for prefix in prefixes {
+            if let Some(rest) = part.strip_prefix(prefix) {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), String> {
     let mut conn = open_conn()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -547,6 +558,10 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
     // Save GitHub cache if present in remote_snapshot and auth_login is present
     if let Some(login) = auth_login {
         if let Some(ref remote) = cache.remote_snapshot {
+            let prs_err = remote
+                .github_error
+                .as_deref()
+                .and_then(|err| extract_endpoint_error(err, &["PRs: "]));
             save_github_cache_data(
                 &tx,
                 repo_id,
@@ -554,9 +569,14 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
                 "prs",
                 cache.prs_etag.as_deref(),
                 remote.last_refresh.unwrap_or(0),
-                remote.github_error.as_deref(),
+                prs_err.as_deref(),
                 &serde_json::to_string(&remote.pull_requests).unwrap_or_else(|_| "[]".to_string()),
             )?;
+
+            let actions_err = remote
+                .github_error
+                .as_deref()
+                .and_then(|err| extract_endpoint_error(err, &["Actions: "]));
             save_github_cache_data(
                 &tx,
                 repo_id,
@@ -564,9 +584,14 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
                 "actions",
                 cache.actions_etag.as_deref(),
                 remote.last_refresh.unwrap_or(0),
-                remote.github_error.as_deref(),
+                actions_err.as_deref(),
                 &serde_json::to_string(&remote.action_runs).unwrap_or_else(|_| "[]".to_string()),
             )?;
+
+            let releases_err = remote
+                .github_error
+                .as_deref()
+                .and_then(|err| extract_endpoint_error(err, &["Releases: "]));
             save_github_cache_data(
                 &tx,
                 repo_id,
@@ -574,7 +599,7 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
                 "releases",
                 cache.releases_etag.as_deref(),
                 remote.last_refresh.unwrap_or(0),
-                remote.github_error.as_deref(),
+                releases_err.as_deref(),
                 &serde_json::to_string(&remote.releases).unwrap_or_else(|_| "[]".to_string()),
             )?;
 
@@ -583,6 +608,9 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
                 .iter()
                 .filter(|p| p.package_type == "container")
                 .collect();
+            let container_err = remote.github_error.as_deref().and_then(|err| {
+                extract_endpoint_error(err, &["Container Packages: ", "Packages: "])
+            });
             save_github_cache_data(
                 &tx,
                 repo_id,
@@ -590,7 +618,7 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
                 "packages_container",
                 cache.packages_container_etag.as_deref(),
                 remote.last_refresh.unwrap_or(0),
-                remote.github_error.as_deref(),
+                container_err.as_deref(),
                 &serde_json::to_string(&containers).unwrap_or_else(|_| "[]".to_string()),
             )?;
 
@@ -599,6 +627,10 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
                 .iter()
                 .filter(|p| p.package_type == "npm")
                 .collect();
+            let npm_err = remote
+                .github_error
+                .as_deref()
+                .and_then(|err| extract_endpoint_error(err, &["NPM Packages: ", "Packages: "]));
             save_github_cache_data(
                 &tx,
                 repo_id,
@@ -606,7 +638,7 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
                 "packages_npm",
                 cache.packages_npm_etag.as_deref(),
                 remote.last_refresh.unwrap_or(0),
-                remote.github_error.as_deref(),
+                npm_err.as_deref(),
                 &serde_json::to_string(&npms).unwrap_or_else(|_| "[]".to_string()),
             )?;
         }
@@ -2377,6 +2409,146 @@ mod tests {
         let loaded_none = load_cache(&path_str, None).unwrap();
         assert_eq!(loaded_none.local_snapshot.ownership, None);
         assert!(loaded_none.remote_snapshot.is_none());
+
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_endpoint_error_isolation() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "palimpsest_err_iso_test_{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_dir.join(".git")).unwrap();
+        let _guard = TestDbGuard::new(temp_dir.join("test.db"));
+        let path_str = temp_dir.to_str().unwrap().to_string();
+
+        let local = BoundedLocalSnapshot {
+            commits: vec![],
+            branches: vec![],
+            remotes: vec![Remote {
+                name: "origin".to_string(),
+                url: "git@github.com:alice/project.git".to_string(),
+            }],
+            tags: vec![],
+            stashes: vec![],
+            status: RepoStatus {
+                branch: "main".to_string(),
+                staged_count: 0,
+                unstaged_count: 0,
+                staged_files: vec![],
+                unstaged_files: vec![],
+                additions: 0,
+                deletions: 0,
+                files_changed: 0,
+            },
+            repo_error: None,
+            last_refresh: None,
+            ownership: None,
+        };
+
+        // 1. Save single error
+        let mut dc = DiskCache {
+            schema_version: SCHEMA_VERSION,
+            repo_path: path_str.clone(),
+            repo_fingerprint: "dummy-fp".to_string(),
+            captured_at: 1000,
+            local_snapshot: local.clone(),
+            remote_snapshot: Some(RepoRemoteSnapshot {
+                pull_requests: vec![],
+                action_runs: vec![],
+                releases: vec![],
+                packages: vec![],
+                github_error: Some("PRs: Rate Limit Exceeded".to_string()),
+                last_refresh: Some(2000),
+                ownership: RepoOwnership::Owned,
+            }),
+            prs_etag: None,
+            actions_etag: None,
+            releases_etag: None,
+            packages_container_etag: None,
+            packages_npm_etag: None,
+        };
+
+        save_cache(&dc, Some("alice")).unwrap();
+
+        // Check raw database contents
+        {
+            let conn = open_conn().unwrap();
+            let repo_id: i64 = conn
+                .query_row("SELECT id FROM repos WHERE path = ?", [&path_str], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+
+            // prs endpoint should have "Rate Limit Exceeded"
+            let prs_err: Option<String> = conn.query_row(
+                "SELECT error FROM github_cache WHERE repo_id = ? AND auth_login = 'alice' AND endpoint = 'prs'",
+                [repo_id],
+                |r| r.get(0)
+            ).unwrap();
+            assert_eq!(prs_err, Some("Rate Limit Exceeded".to_string()));
+
+            // actions endpoint should have NULL/None error
+            let actions_err: Option<String> = conn.query_row(
+                "SELECT error FROM github_cache WHERE repo_id = ? AND auth_login = 'alice' AND endpoint = 'actions'",
+                [repo_id],
+                |r| r.get(0)
+            ).unwrap();
+            assert_eq!(actions_err, None);
+        }
+
+        // Hydrate from cache and verify
+        let loaded = load_cache(&path_str, Some("alice")).unwrap();
+        assert_eq!(
+            loaded.remote_snapshot.unwrap().github_error.as_deref(),
+            Some("PRs: Rate Limit Exceeded")
+        );
+
+        // 2. Save aggregate errors
+        dc.remote_snapshot = Some(RepoRemoteSnapshot {
+            pull_requests: vec![],
+            action_runs: vec![],
+            releases: vec![],
+            packages: vec![],
+            github_error: Some("PRs: err1, Actions: err2".to_string()),
+            last_refresh: Some(3000),
+            ownership: RepoOwnership::Owned,
+        });
+
+        save_cache(&dc, Some("alice")).unwrap();
+
+        // Check raw database contents
+        {
+            let conn = open_conn().unwrap();
+            let repo_id: i64 = conn
+                .query_row("SELECT id FROM repos WHERE path = ?", [&path_str], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+
+            let prs_err: Option<String> = conn.query_row(
+                "SELECT error FROM github_cache WHERE repo_id = ? AND auth_login = 'alice' AND endpoint = 'prs'",
+                [repo_id],
+                |r| r.get(0)
+            ).unwrap();
+            assert_eq!(prs_err, Some("err1".to_string()));
+
+            let actions_err: Option<String> = conn.query_row(
+                "SELECT error FROM github_cache WHERE repo_id = ? AND auth_login = 'alice' AND endpoint = 'actions'",
+                [repo_id],
+                |r| r.get(0)
+            ).unwrap();
+            assert_eq!(actions_err, Some("err2".to_string()));
+        }
+
+        // Hydrate and verify order/content
+        let loaded = load_cache(&path_str, Some("alice")).unwrap();
+        let final_err = loaded.remote_snapshot.unwrap().github_error.unwrap();
+        assert_eq!(final_err, "PRs: err1, Actions: err2");
 
         fs::remove_dir_all(&temp_dir).unwrap();
     }

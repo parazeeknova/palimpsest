@@ -393,7 +393,6 @@ fn handle_github_304(
     github_login: Option<&str>,
     endpoint: &str,
     cached_remote: &mut Option<RepoRemoteSnapshot>,
-    any_304: &mut bool,
 ) {
     tracing::info!(
         repo = %repo_path,
@@ -402,18 +401,25 @@ fn handle_github_304(
         "GitHub 304 NotModified returned; touched cache entry freshness in SQLite"
     );
     if let Some(login) = github_login {
-        let _ = crate::git::cache::touch_github_cache_entry(
+        if let Err(e) = crate::git::cache::touch_github_cache_entry(
             repo_path,
             login,
             endpoint,
             now_millis(),
             true,
-        );
+        ) {
+            tracing::warn!(
+                repo = %repo_path,
+                user = %login,
+                endpoint = %endpoint,
+                err = %e,
+                "Failed to touch GitHub cache entry freshness in SQLite"
+            );
+        }
     }
     if let Some(r) = cached_remote {
         r.last_refresh = Some(now_millis());
     }
-    *any_304 = true;
 }
 
 pub fn spawn_repo_tracker(
@@ -802,7 +808,6 @@ pub fn spawn_repo_tracker(
                         if let Some(_permit) = try_acquire_job() {
                             tracing::info!(repo = %repo_name, owner = %owner, "Triggered GitHub remote metadata sync");
                             let mut remote_changed = false;
-                            let mut any_304 = false;
                             let mut errors = Vec::new();
                             let had_in_memory_error = cached_remote
                                 .as_ref()
@@ -851,7 +856,6 @@ pub fn spawn_repo_tracker(
                                         github_login.as_deref(),
                                         "prs",
                                         &mut cached_remote,
-                                        &mut any_304,
                                     );
                                 }
                                 Ok(github_api::GitHubResponse::Error(e)) => {
@@ -890,7 +894,6 @@ pub fn spawn_repo_tracker(
                                         github_login.as_deref(),
                                         "actions",
                                         &mut cached_remote,
-                                        &mut any_304,
                                     );
                                 }
                                 Ok(github_api::GitHubResponse::Error(e)) => {
@@ -929,7 +932,6 @@ pub fn spawn_repo_tracker(
                                         github_login.as_deref(),
                                         "releases",
                                         &mut cached_remote,
-                                        &mut any_304,
                                     );
                                 }
                                 Ok(github_api::GitHubResponse::Error(e)) => {
@@ -979,7 +981,6 @@ pub fn spawn_repo_tracker(
                                                 github_login.as_deref(),
                                                 "packages_container",
                                                 &mut cached_remote,
-                                                &mut any_304,
                                             );
                                         }
                                         github_api::GitHubResponse::Error(e) => {
@@ -1011,7 +1012,6 @@ pub fn spawn_repo_tracker(
                                                 github_login.as_deref(),
                                                 "packages_npm",
                                                 &mut cached_remote,
-                                                &mut any_304,
                                             );
                                         }
                                         github_api::GitHubResponse::Error(e) => {
@@ -1029,6 +1029,9 @@ pub fn spawn_repo_tracker(
                                 Err(e) => errors.push(format!("Packages: {e}")),
                             }
 
+                            // We intentionally do NOT dispatch a RepoLiveEvent::Remote or save the cache on pure 304 refreshes.
+                            // This prevents unnecessary UI repaints since the UI does not display freshness timestamps,
+                            // avoiding expensive redraw loops when no visual data has actually changed.
                             let error_cleared = had_in_memory_error && errors.is_empty();
                             let should_dispatch = remote_changed || error_cleared;
 
@@ -1174,12 +1177,9 @@ mod tests {
             ownership: RepoOwnership::Owned,
         });
 
-        let mut any_304 = false;
-
         // Simulate 304 response (github_login is None to prevent trying to hit real DB in mock context)
-        handle_github_304("dummy_path", None, "prs", &mut cached_remote, &mut any_304);
+        handle_github_304("dummy_path", None, "prs", &mut cached_remote);
 
-        assert!(any_304);
         let snapshot = cached_remote.as_ref().unwrap();
         assert!(snapshot.last_refresh.unwrap() > 1000);
         assert_eq!(
