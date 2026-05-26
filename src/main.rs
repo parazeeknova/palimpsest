@@ -2075,6 +2075,7 @@ impl eframe::App for PalimpsestApp {
             current_branch,
             &state,
             self.current_repo_owned_by_authed_user,
+            self.body_state.layout,
         );
         let ctx = ui.ctx().clone();
 
@@ -2104,6 +2105,15 @@ impl eframe::App for PalimpsestApp {
             toolbar::ToolbarAction::NewBranch => {
                 self.show_create_branch_dialog = true;
                 self.new_branch_name.clear();
+            }
+            toolbar::ToolbarAction::SetDrawerLayoutHorizontal => {
+                self.body_state.layout = body::CommitDrawerLayout::Horizontal;
+            }
+            toolbar::ToolbarAction::SetDrawerLayoutVertical => {
+                self.body_state.layout = body::CommitDrawerLayout::Vertical;
+                if self.body_state.drawer_state.height == 240.0 {
+                    self.body_state.drawer_state.height = 450.0;
+                }
             }
             toolbar::ToolbarAction::None => {}
         }

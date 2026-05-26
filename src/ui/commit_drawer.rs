@@ -94,6 +94,7 @@ pub enum CommitDrawerResponse {
     Attach,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -102,6 +103,7 @@ pub fn show(
     commit: Option<&CommitDrawerCommit>,
     signature: Option<&CommitDrawerSignature>,
     files: &[FileStatus],
+    vertical: bool,
 ) -> CommitDrawerResponse {
     let fill = egui::Color32::from_rgb(36, 36, 36);
     let header_fill = egui::Color32::from_rgb(44, 44, 44);
@@ -121,22 +123,44 @@ pub fn show(
     );
     ui.painter().rect_filled(header_rect, 0.0, header_fill);
 
-    let resize_grip_height = 8.0;
-    let resize_grip_rect = egui::Rect::from_min_size(
-        panel_rect.left_top(),
-        egui::vec2(panel_rect.width(), resize_grip_height),
-    );
-    let resize_response = ui.interact(
-        resize_grip_rect,
-        ui.make_persistent_id("commit_drawer_resize"),
-        egui::Sense::drag(),
-    );
-    if resize_response.dragged() {
-        state.height = (state.height - resize_response.drag_delta().y).clamp(140.0, 520.0);
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-    }
-    if resize_response.hovered() || resize_response.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    if !state.detached {
+        if vertical {
+            let resize_grip_width = 8.0;
+            let resize_grip_rect = egui::Rect::from_min_size(
+                panel_rect.left_top(),
+                egui::vec2(resize_grip_width, panel_rect.height()),
+            );
+            let resize_response = ui.interact(
+                resize_grip_rect,
+                ui.make_persistent_id("commit_drawer_resize"),
+                egui::Sense::drag(),
+            );
+            if resize_response.dragged() {
+                state.height = (state.height - resize_response.drag_delta().x).clamp(200.0, 700.0);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if resize_response.hovered() || resize_response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+        } else {
+            let resize_grip_height = 8.0;
+            let resize_grip_rect = egui::Rect::from_min_size(
+                panel_rect.left_top(),
+                egui::vec2(panel_rect.width(), resize_grip_height),
+            );
+            let resize_response = ui.interact(
+                resize_grip_rect,
+                ui.make_persistent_id("commit_drawer_resize"),
+                egui::Sense::drag(),
+            );
+            if resize_response.dragged() {
+                state.height = (state.height - resize_response.drag_delta().y).clamp(140.0, 520.0);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            }
+            if resize_response.hovered() || resize_response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            }
+        }
     }
 
     let mut action = CommitDrawerResponse::None;

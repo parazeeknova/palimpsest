@@ -2,7 +2,7 @@ use eframe::egui;
 use egui_phosphor::regular::{
     BOOKMARK, CARET_DOWN, CARET_RIGHT, CHECK, CHECK_CIRCLE, EYE, FILE_TEXT, FOLDER, FUNNEL,
     GEAR_SIX, GIT_BRANCH, GIT_PULL_REQUEST, GITHUB_LOGO, LIST, MAGNIFYING_GLASS, PACKAGE,
-    PLAY_CIRCLE, STACK, WARNING_CIRCLE,
+    PLAY_CIRCLE, STACK, TREE_VIEW, WARNING_CIRCLE,
 };
 
 use crate::state::AppState;
@@ -502,7 +502,7 @@ fn paint_mode_bar(
     painter_text(
         ui,
         egui::pos2(row.left() + third * 2.5, row.center().y),
-        GITHUB_LOGO,
+        TREE_VIEW,
         18.0,
         muted,
         egui::Align2::CENTER_CENTER,

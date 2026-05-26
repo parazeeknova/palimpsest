@@ -1,9 +1,10 @@
 use crate::state::AppState;
+use crate::ui::body::CommitDrawerLayout;
 use eframe::egui;
 use egui_phosphor::regular::{
-    ARROW_CLOCKWISE, ARROW_COUNTER_CLOCKWISE, ARROWS_CLOCKWISE, BROWSERS, CARET_DOWN, FOLDER,
-    GIT_BRANCH, GIT_COMMIT, GIT_FORK, GIT_PULL_REQUEST, GLOBE_SIMPLE, SIDEBAR, STACK, TAG,
-    TERMINAL_WINDOW, TEXT_ALIGN_LEFT, USER_CIRCLE,
+    ARROW_CLOCKWISE, ARROW_COUNTER_CLOCKWISE, ARROWS_CLOCKWISE, BROWSERS, CARET_DOWN, CHECK,
+    COLUMNS, FOLDER, GIT_BRANCH, GIT_COMMIT, GIT_FORK, GIT_PULL_REQUEST, GLOBE_SIMPLE, ROWS,
+    SIDEBAR, STACK, TAG, TERMINAL_WINDOW, TEXT_ALIGN_LEFT, USER_CIRCLE,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +18,8 @@ pub enum ToolbarAction {
     StashApply,
     StashPop,
     NewBranch,
+    SetDrawerLayoutHorizontal,
+    SetDrawerLayoutVertical,
 }
 
 const TOOLBAR_HEIGHT: f32 = 46.0;
@@ -33,6 +36,7 @@ pub fn show(
     current_branch: Option<&str>,
     state: &AppState,
     current_repo_owned_by_authed_user: Option<bool>,
+    current_layout: CommitDrawerLayout,
 ) -> ToolbarAction {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, TOOLBAR_HEIGHT), egui::Sense::hover());
@@ -85,7 +89,7 @@ pub fn show(
         right_rect.shrink2(egui::vec2(8.0, 3.0)),
         "toolbar_right",
         egui::Layout::right_to_left(egui::Align::Center),
-        |ui| right_panel(ui, &mut toolbar_action),
+        |ui| right_panel(ui, &mut toolbar_action, current_layout),
     );
     toolbar_action
 }
@@ -444,10 +448,97 @@ fn center_panel(
     );
 }
 
-fn right_panel(ui: &mut egui::Ui, action: &mut ToolbarAction) {
+fn right_panel(ui: &mut egui::Ui, action: &mut ToolbarAction, current_layout: CommitDrawerLayout) {
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
     toolbar_button(ui, ACTION_WIDTH, BROWSERS, "Workspace", Some(CARET_DOWN));
-    toolbar_button(ui, ACTION_WIDTH, SIDEBAR, "Appearance", Some(CARET_DOWN));
+    toolbar_menu_button(
+        ui,
+        ACTION_WIDTH,
+        SIDEBAR,
+        "Appearance",
+        Some(CARET_DOWN),
+        |ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 1.0);
+            ui.label(
+                egui::RichText::new("Commit Drawer")
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(120, 120, 120)),
+            );
+            ui.add_space(2.0);
+
+            let is_horizontal = current_layout == CommitDrawerLayout::Horizontal;
+            let is_vertical = current_layout == CommitDrawerLayout::Vertical;
+
+            let row_width = 140.0;
+            let row_height = 20.0;
+
+            // Horizontal option
+            let (h_rect, h_resp) =
+                ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
+            if h_resp.hovered() {
+                ui.painter()
+                    .rect_filled(h_rect, 3.0, egui::Color32::from_white_alpha(15));
+            }
+            let text_color = if is_horizontal {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_rgb(190, 190, 190)
+            };
+            ui.painter().text(
+                egui::pos2(h_rect.left() + 6.0, h_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                format!("{} Horizontal", ROWS),
+                egui::FontId::proportional(11.0),
+                text_color,
+            );
+            if is_horizontal {
+                ui.painter().text(
+                    egui::pos2(h_rect.right() - 6.0, h_rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    CHECK,
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgb(130, 200, 130),
+                );
+            }
+            if h_resp.clicked() {
+                *action = ToolbarAction::SetDrawerLayoutHorizontal;
+                ui.close();
+            }
+
+            // Vertical option
+            let (v_rect, v_resp) =
+                ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
+            if v_resp.hovered() {
+                ui.painter()
+                    .rect_filled(v_rect, 3.0, egui::Color32::from_white_alpha(15));
+            }
+            let text_color = if is_vertical {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::from_rgb(190, 190, 190)
+            };
+            ui.painter().text(
+                egui::pos2(v_rect.left() + 6.0, v_rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                format!("{} Vertical", COLUMNS),
+                egui::FontId::proportional(11.0),
+                text_color,
+            );
+            if is_vertical {
+                ui.painter().text(
+                    egui::pos2(v_rect.right() - 6.0, v_rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    CHECK,
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::from_rgb(130, 200, 130),
+                );
+            }
+            if v_resp.clicked() {
+                *action = ToolbarAction::SetDrawerLayoutVertical;
+                ui.close();
+            }
+        },
+    );
     toolbar_button(ui, ACTION_WIDTH, TERMINAL_WINDOW, "Console", None);
     toolbar_button(
         ui,
@@ -532,10 +623,10 @@ fn toolbar_menu_button(
         },
     );
 
-    let popup_id = response.response.id.with("popup");
+    let interacted = response.response.interact(egui::Sense::click());
+    let popup_id = interacted.id.with("popup");
     let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
 
-    let interacted = response.response.interact(egui::Sense::click());
     if interacted.hovered() || is_open {
         ui.painter().rect_filled(
             response.response.rect,
@@ -544,7 +635,7 @@ fn toolbar_menu_button(
         );
     }
 
-    egui::Popup::menu(&response.response)
+    egui::Popup::from_toggle_button_response(&interacted)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(add_contents);
 }
