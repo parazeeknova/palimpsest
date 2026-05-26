@@ -792,6 +792,8 @@ pub fn spawn_repo_tracker(
                                     &path,
                                     &current_local.status,
                                     &new_fps,
+                                    current_local.repo_error.as_deref(),
+                                    current_local.last_refresh,
                                 ) {
                                     Ok(()) => {
                                         pending_status_save = false;

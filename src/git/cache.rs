@@ -304,13 +304,31 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 3 {
         let tx = conn.unchecked_transaction()?;
-        tx.execute("ALTER TABLE repo_status ADD COLUMN repo_error TEXT", [])?;
+        let mut has_repo_error = false;
+        let mut has_last_refresh = false;
+        {
+            let mut stmt = tx.prepare("PRAGMA table_info(repo_status)")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(1)?;
+                if name == "repo_error" {
+                    has_repo_error = true;
+                } else if name == "last_refresh" {
+                    has_last_refresh = true;
+                }
+            }
+        }
+        if !has_repo_error {
+            tx.execute("ALTER TABLE repo_status ADD COLUMN repo_error TEXT", [])?;
+        }
+        if !has_last_refresh {
+            tx.execute(
+                "ALTER TABLE repo_status ADD COLUMN last_refresh INTEGER",
+                [],
+            )?;
+        }
         tx.execute(
-            "ALTER TABLE repo_status ADD COLUMN last_refresh INTEGER",
-            [],
-        )?;
-        tx.execute(
-            "INSERT INTO schema_migrations (version, applied_at) VALUES (3, ?)",
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (3, ?)",
             [now_millis() as i64],
         )?;
         tx.commit()?;
@@ -699,6 +717,8 @@ pub fn save_status_slice(
     repo_path: &str,
     status: &RepoStatus,
     fps: &RepoFingerprints,
+    repo_error: Option<&str>,
+    last_refresh: Option<u128>,
 ) -> Result<(), String> {
     let mut conn = open_conn()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -712,8 +732,8 @@ pub fn save_status_slice(
     .map_err(|e| e.to_string())?;
 
     tx.execute(
-        "INSERT INTO repo_status (repo_id, branch, staged_count, unstaged_count, additions, deletions, files_changed, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO repo_status (repo_id, branch, staged_count, unstaged_count, additions, deletions, files_changed, updated_at, repo_error, last_refresh)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(repo_id) DO UPDATE SET
             branch = excluded.branch,
             staged_count = excluded.staged_count,
@@ -721,7 +741,9 @@ pub fn save_status_slice(
             additions = excluded.additions,
             deletions = excluded.deletions,
             files_changed = excluded.files_changed,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            repo_error = excluded.repo_error,
+            last_refresh = excluded.last_refresh",
         (
             repo_id,
             &status.branch,
@@ -731,6 +753,8 @@ pub fn save_status_slice(
             status.deletions as i64,
             status.files_changed as i64,
             now,
+            repo_error,
+            last_refresh.map(|t| t as i64),
         ),
     ).map_err(|e| e.to_string())?;
 
@@ -2261,7 +2285,7 @@ mod tests {
             config: "fp-status-config".to_string(),
         };
 
-        save_status_slice(&path_str, &new_status, &fp_status).unwrap();
+        save_status_slice(&path_str, &new_status, &fp_status, None, None).unwrap();
 
         // Reload and assert
         let loaded = load_cache(&path_str, None).unwrap();

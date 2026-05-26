@@ -413,6 +413,7 @@ pub struct State {
     pub selected_commit_hash: Option<String>,
     selected_commit_cache_hash: Option<String>,
     selected_commit_cache_populated_with_repo: bool,
+    selected_commit_cache_repo: Option<String>,
     pub selected_commit_cache: Option<commit_drawer::CommitDrawerCommit>,
     pub selected_commit_signature_cache: Option<commit_drawer::CommitDrawerSignature>,
     pub selected_commit_files_cache: Vec<crate::git::models::FileStatus>,
@@ -436,6 +437,7 @@ impl Default for State {
             selected_commit_hash: None,
             selected_commit_cache_hash: None,
             selected_commit_cache_populated_with_repo: false,
+            selected_commit_cache_repo: None,
             selected_commit_cache: None,
             selected_commit_signature_cache: None,
             selected_commit_files_cache: Vec::new(),
@@ -478,11 +480,13 @@ impl State {
             self.selected_commit_signature_cache = None;
             self.selected_commit_files_cache.clear();
             self.selected_commit_cache_populated_with_repo = false;
+            self.selected_commit_cache_repo = None;
             return;
         };
 
         if self.selected_commit_cache_hash.as_deref() == Some(hash)
             && self.selected_commit_cache_populated_with_repo == git_repo.is_some()
+            && self.selected_commit_cache_repo == app_state.current_repo
         {
             return;
         }
@@ -494,6 +498,7 @@ impl State {
             self.selected_commit_signature_cache = None;
             self.selected_commit_files_cache.clear();
             self.selected_commit_cache_populated_with_repo = false;
+            self.selected_commit_cache_repo = None;
             self.selected_row = None;
             return;
         };
@@ -501,6 +506,7 @@ impl State {
         // Populate lightweight details synchronously
         self.selected_commit_cache_hash = Some(hash.to_string());
         self.selected_commit_cache_populated_with_repo = git_repo.is_some();
+        self.selected_commit_cache_repo = app_state.current_repo.clone();
         self.selected_commit_cache = Some(commit_drawer::CommitDrawerCommit {
             hash: commit.hash.clone(),
             short_hash: commit.short_hash.clone(),
@@ -676,6 +682,22 @@ pub fn show_cached(
         if !app_state.cached_commits.is_empty() {
             state.graph_data.add_commits(&app_state.cached_commits);
         }
+        if let Some(ref hash) = state.selected_commit_hash {
+            let found_idx = state
+                .graph_data
+                .commits
+                .iter()
+                .position(|entry| entry.data.hash == *hash);
+            if let Some(idx) = found_idx {
+                let limit = state.graph_data.commits.len().saturating_sub(1);
+                state.selected_row = Some(idx.min(limit));
+            } else {
+                state.selected_row = None;
+                state.selected_commit_hash = None;
+            }
+        } else {
+            state.selected_row = None;
+        }
     }
 
     state.refresh_refs(app_state);
@@ -689,7 +711,18 @@ pub fn show_cached(
 
     ui.painter().rect_filled(rect, 0.0, bg);
 
+    let mut drawer_height = 0.0;
+
     if app_state.cached_commits.is_empty() {
+        state.selected_commit_hash = None;
+        state.selected_commit_cache_hash = None;
+        state.selected_commit_cache = None;
+        state.selected_commit_signature_cache = None;
+        state.selected_commit_files_cache.clear();
+        state.selected_commit_cache_populated_with_repo = false;
+        state.selected_commit_cache_repo = None;
+        state.selected_row = None;
+
         let logo = egui::Image::new(egui::include_image!("../assets/logo.svg"))
             .tint(egui::Color32::from_white_alpha(40))
             .fit_to_exact_size(egui::vec2(200.0, 200.0));
@@ -715,7 +748,7 @@ pub fn show_cached(
             rect.right_bottom(),
         );
 
-        let drawer_height = if state.selected_commit_hash.is_some() {
+        drawer_height = if state.selected_commit_hash.is_some() {
             state.drawer_state.height.clamp(0.0, rows_rect.height())
         } else {
             0.0
@@ -782,7 +815,7 @@ pub fn show_cached(
 
     if show_panel {
         let bottom_offset = if state.selected_commit_hash.is_some() {
-            state.drawer_state.height
+            drawer_height
         } else {
             0.0
         };

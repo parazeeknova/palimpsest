@@ -79,7 +79,7 @@ struct PalimpsestApp {
     authed_github_login: Option<String>,
     current_repo_owned_by_authed_user: Option<bool>,
     manager_repo_filter: repo_manager_sidebar::RepoOwnershipFilter,
-    repo_metadata_fetches: std::collections::HashSet<String>,
+    repo_metadata_fetches: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     avatar_fetches: std::collections::HashSet<String>,
     show_clone_dialog: bool,
     clone_url: String,
@@ -191,7 +191,9 @@ impl PalimpsestApp {
                 "external" => repo_manager_sidebar::RepoOwnershipFilter::External,
                 _ => repo_manager_sidebar::RepoOwnershipFilter::All,
             },
-            repo_metadata_fetches: std::collections::HashSet::new(),
+            repo_metadata_fetches: Arc::new(
+                std::sync::Mutex::new(std::collections::HashSet::new()),
+            ),
             avatar_fetches: std::collections::HashSet::new(),
             show_clone_dialog: false,
             clone_url: String::new(),
@@ -1297,12 +1299,20 @@ impl PalimpsestApp {
     }
 
     fn trigger_github_metadata_fetch(&mut self, details: palimpsest::state::ManagerRepoDetails) {
-        if self.repo_metadata_fetches.contains(&details.repo_path) {
-            return;
+        {
+            let mut fetches = self.repo_metadata_fetches.lock().unwrap();
+            if fetches.contains(&details.repo_path) {
+                return;
+            }
+            fetches.insert(details.repo_path.clone());
         }
 
         let creds = palimpsest::auth::credentials::load_credentials();
         let Some(token) = creds.github_token.clone() else {
+            self.repo_metadata_fetches
+                .lock()
+                .unwrap()
+                .remove(&details.repo_path);
             return;
         };
 
@@ -1317,14 +1327,17 @@ impl PalimpsestApp {
         }
 
         let Some((owner, repo)) = gh_remote else {
+            self.repo_metadata_fetches
+                .lock()
+                .unwrap()
+                .remove(&details.repo_path);
             return;
         };
-
-        self.repo_metadata_fetches.insert(details.repo_path.clone());
 
         let store = self.store.clone();
         let details_clone = details.clone();
         let ctx = self.egui_ctx.clone();
+        let fetches_clone = self.repo_metadata_fetches.clone();
 
         tracing::debug!("Triggering background GitHub metadata fetch for {owner}/{repo}");
 
@@ -1339,6 +1352,9 @@ impl PalimpsestApp {
                     let mut updated = details_clone;
                     updated.is_org = Some(meta.is_org);
                     updated.is_private = Some(meta.is_private);
+
+                    fetches_clone.lock().unwrap().remove(&updated.repo_path);
+
                     if store.get_state().manager_selected_repo.as_ref() == Some(&updated.repo_path)
                     {
                         store.dispatch(AppAction::SetManagerDetails(Some(updated)));
@@ -1350,6 +1366,9 @@ impl PalimpsestApp {
                     let mut updated = details_clone;
                     updated.is_org = None;
                     updated.is_private = None;
+
+                    fetches_clone.lock().unwrap().remove(&updated.repo_path);
+
                     if store.get_state().manager_selected_repo.as_ref() == Some(&updated.repo_path)
                     {
                         store.dispatch(AppAction::SetManagerDetails(Some(updated)));
