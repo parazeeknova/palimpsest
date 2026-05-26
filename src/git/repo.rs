@@ -5,6 +5,10 @@ use std::time::SystemTime;
 
 use git2::{Repository, Sort, StashFlags, StatusOptions};
 
+use crate::cdv::{
+    CommitDiffFile, CommitDiffFileKind, CommitDiffHunk, CommitDiffLine, CommitDiffLineKind,
+    CommitDiffSummary, CommitDiffViewModel,
+};
 use crate::git::error::GitError;
 use crate::git::models::{
     Branch, Commit, CommitSignatureInfo, FileChangeKind, FileStatus, Remote, RepoStatus, Stash, Tag,
@@ -250,6 +254,278 @@ impl GitRepo {
         })?;
 
         Ok(files)
+    }
+
+    pub fn commit_diff_view(&self, hash: &str) -> Result<CommitDiffViewModel, GitError> {
+        let commit = self.repo.revparse_single(hash)?.peel_to_commit()?;
+        let tree = commit.tree()?;
+        let parent_tree = commit
+            .parents()
+            .next()
+            .and_then(|parent| parent.tree().ok());
+
+        let mut diff_opts = git2::DiffOptions::new();
+        diff_opts.show_binary(true);
+        diff_opts.context_lines(3);
+        diff_opts.interhunk_lines(0);
+
+        let mut diff = match parent_tree {
+            Some(parent_tree) => self.repo.diff_tree_to_tree(
+                Some(&parent_tree),
+                Some(&tree),
+                Some(&mut diff_opts),
+            )?,
+            None => self
+                .repo
+                .diff_tree_to_tree(None, Some(&tree), Some(&mut diff_opts))?,
+        };
+
+        let mut find_opts = git2::DiffFindOptions::new();
+        find_opts
+            .renames(true)
+            .copies(true)
+            .break_rewrites(true)
+            .rename_limit(512);
+        diff.find_similar(Some(&mut find_opts))?;
+
+        struct DiffAccumulator {
+            files: Vec<CommitDiffFile>,
+            current_file_index: Option<usize>,
+            current_hunk_index: Option<usize>,
+            file_is_binary: bool,
+            file_additions: usize,
+            file_deletions: usize,
+            file_lines: usize,
+            file_hunks: usize,
+            file_truncated: bool,
+            diff_truncated: bool,
+        }
+
+        let acc = std::cell::RefCell::new(DiffAccumulator {
+            files: Vec::new(),
+            current_file_index: None,
+            current_hunk_index: None,
+            file_is_binary: false,
+            file_additions: 0,
+            file_deletions: 0,
+            file_lines: 0,
+            file_hunks: 0,
+            file_truncated: false,
+            diff_truncated: false,
+        });
+
+        let mut summary = CommitDiffSummary::default();
+        let start = std::time::Instant::now();
+        let foreach_result = diff.foreach(
+            &mut |delta, _progress| {
+                let mut acc = acc.borrow_mut();
+                if acc.files.len() >= 250 {
+                    acc.diff_truncated = true;
+                    return false;
+                }
+
+                let path = delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())
+                    .and_then(|p| p.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let old_path = delta
+                    .old_file()
+                    .path()
+                    .and_then(|p| p.to_str())
+                    .map(|s| s.to_string());
+
+                let kind = match delta.status() {
+                    git2::Delta::Added => CommitDiffFileKind::Added,
+                    git2::Delta::Deleted => CommitDiffFileKind::Deleted,
+                    git2::Delta::Renamed => CommitDiffFileKind::Renamed,
+                    git2::Delta::Typechange => CommitDiffFileKind::TypeChanged,
+                    git2::Delta::Copied => CommitDiffFileKind::Copied,
+                    git2::Delta::Untracked => CommitDiffFileKind::Untracked,
+                    _ => CommitDiffFileKind::Modified,
+                };
+
+                acc.files.push(CommitDiffFile {
+                    path,
+                    old_path,
+                    kind,
+                    staged: true,
+                    additions: 0,
+                    deletions: 0,
+                    is_binary: false,
+                    hunks: Vec::new(),
+                });
+                acc.current_file_index = Some(acc.files.len() - 1);
+                acc.current_hunk_index = None;
+                acc.file_is_binary = delta.flags().contains(git2::DiffFlags::BINARY);
+                acc.file_additions = 0;
+                acc.file_deletions = 0;
+                acc.file_lines = 0;
+                acc.file_hunks = 0;
+                acc.file_truncated = false;
+                true
+            },
+            Some(&mut |_delta, _binary| {
+                let mut acc = acc.borrow_mut();
+                if let Some(index) = acc.current_file_index {
+                    acc.files[index].is_binary = true;
+                }
+                true
+            }),
+            Some(&mut |_delta, hunk| {
+                let mut acc = acc.borrow_mut();
+                if acc.current_file_index.is_none() {
+                    return true;
+                }
+                if acc.file_hunks >= 8_000 {
+                    acc.file_truncated = true;
+                    acc.diff_truncated = true;
+                    return false;
+                }
+
+                let header = String::from_utf8_lossy(hunk.header()).to_string();
+                let file_index = acc.current_file_index.expect("file index set before hunk");
+                acc.files[file_index].hunks.push(CommitDiffHunk {
+                    header,
+                    old_start: hunk.old_start(),
+                    old_lines: hunk.old_lines(),
+                    new_start: hunk.new_start(),
+                    new_lines: hunk.new_lines(),
+                    lines: Vec::new(),
+                });
+                acc.current_hunk_index = Some(acc.files[file_index].hunks.len() - 1);
+                acc.file_hunks += 1;
+                true
+            }),
+            Some(&mut |_delta, _hunk, line| {
+                let mut acc = acc.borrow_mut();
+                let Some(file_index) = acc.current_file_index else {
+                    return true;
+                };
+                let Some(hunk_index) = acc.current_hunk_index else {
+                    return true;
+                };
+                if acc.file_lines >= 20_000 {
+                    acc.file_truncated = true;
+                    acc.diff_truncated = true;
+                    return false;
+                }
+
+                let kind = match line.origin() {
+                    '+' => CommitDiffLineKind::Addition,
+                    '-' => CommitDiffLineKind::Deletion,
+                    ' ' => CommitDiffLineKind::Context,
+                    '=' => CommitDiffLineKind::EofAddition,
+                    '>' => CommitDiffLineKind::EofAddition,
+                    '<' => CommitDiffLineKind::EofDeletion,
+                    'B' => CommitDiffLineKind::Binary,
+                    _ => CommitDiffLineKind::Context,
+                };
+
+                let content = String::from_utf8_lossy(line.content())
+                    .trim_end_matches('\n')
+                    .to_string();
+                let file = &mut acc.files[file_index];
+                if hunk_index >= file.hunks.len() {
+                    return true;
+                }
+                file.hunks[hunk_index].lines.push(CommitDiffLine {
+                    old_lineno: line.old_lineno(),
+                    new_lineno: line.new_lineno(),
+                    kind,
+                    content,
+                });
+                acc.file_lines += 1;
+                match line.origin() {
+                    '+' | '>' => acc.file_additions += 1,
+                    '-' | '<' => acc.file_deletions += 1,
+                    _ => {}
+                }
+                true
+            }),
+        );
+
+        if let Err(err) = foreach_result {
+            if !acc.borrow().diff_truncated {
+                return Err(GitError::from(err));
+            }
+        }
+
+        let acc = acc.into_inner();
+        let mut files = acc.files;
+        let diff_truncated = acc.diff_truncated;
+        for file in &mut files {
+            file.additions = file
+                .hunks
+                .iter()
+                .map(|h| {
+                    h.lines
+                        .iter()
+                        .filter(|l| {
+                            matches!(
+                                l.kind,
+                                CommitDiffLineKind::Addition | CommitDiffLineKind::EofAddition
+                            )
+                        })
+                        .count()
+                })
+                .sum();
+            file.deletions = file
+                .hunks
+                .iter()
+                .map(|h| {
+                    h.lines
+                        .iter()
+                        .filter(|l| {
+                            matches!(
+                                l.kind,
+                                CommitDiffLineKind::Deletion | CommitDiffLineKind::EofDeletion
+                            )
+                        })
+                        .count()
+                })
+                .sum();
+        }
+
+        if !files.is_empty() {
+            summary.files_changed = files.len();
+            summary.additions = files.iter().map(|file| file.additions).sum();
+            summary.deletions = files.iter().map(|file| file.deletions).sum();
+            summary.hunks = files.iter().map(|file| file.hunks.len()).sum();
+            summary.lines = files
+                .iter()
+                .map(|file| file.hunks.iter().map(|h| h.lines.len()).sum::<usize>())
+                .sum();
+            summary.truncated = diff_truncated;
+        }
+
+        if summary.truncated {
+            tracing::warn!(
+                hash = %hash,
+                files = summary.files_changed,
+                hunks = summary.hunks,
+                lines = summary.lines,
+                "Commit diff view truncated for large commit"
+            );
+        }
+
+        tracing::debug!(
+            hash = %hash,
+            files = summary.files_changed,
+            hunks = summary.hunks,
+            lines = summary.lines,
+            truncated = summary.truncated,
+            elapsed_ms = start.elapsed().as_millis(),
+            "Commit diff view built"
+        );
+
+        Ok(CommitDiffViewModel {
+            commit_hash: hash.to_string(),
+            files,
+            summary,
+        })
     }
 
     pub fn branches(&self) -> Result<Vec<Branch>, GitError> {
@@ -1196,6 +1472,30 @@ fn parse_tag_name_version(tag: &str) -> (u64, u64, u64) {
 mod tests {
     use super::*;
 
+    fn init_temp_repo(prefix: &str) -> (std::path::PathBuf, git2::Repository) {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "{}_{}",
+            prefix,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let repo = git2::Repository::init(&temp_dir).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test User").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+        (temp_dir, repo)
+    }
+
+    fn commit_file(repo: &GitRepo, path: &std::path::Path, contents: &str, message: &str) {
+        std::fs::write(path, contents).unwrap();
+        let relative = path.file_name().unwrap().to_str().unwrap();
+        repo.stage_file(relative).unwrap();
+        repo.commit(message, false).unwrap();
+    }
+
     #[test]
     fn test_commits_limit_zero_and_history_stats() {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -1353,5 +1653,28 @@ mod tests {
     #[test]
     fn parse_commit_signature_output_handles_unsigned() {
         assert!(parse_commit_signature_output("").is_none());
+    }
+
+    #[test]
+    fn commit_diff_view_reports_modified_file() {
+        let (temp_dir, repo) = init_temp_repo("palimpsest_diff_modify");
+        let git_repo = GitRepo::open(temp_dir.to_str().unwrap()).unwrap();
+
+        let file_path = temp_dir.join("file.txt");
+        commit_file(&git_repo, &file_path, "hello\n", "initial");
+
+        std::fs::write(&file_path, "hello\nworld\n").unwrap();
+        git_repo.stage_file("file.txt").unwrap();
+        git_repo.commit("modify", false).unwrap();
+
+        let diff = git_repo.commit_diff_view("HEAD").unwrap();
+        assert_eq!(diff.summary.files_changed, 1);
+        assert_eq!(diff.files.len(), 1);
+        assert!(matches!(diff.files[0].kind, CommitDiffFileKind::Modified));
+        assert_eq!(diff.files[0].path, "file.txt");
+        assert!(diff.files[0].additions >= 1);
+
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+        drop(repo);
     }
 }

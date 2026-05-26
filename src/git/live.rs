@@ -9,6 +9,7 @@ use notify::{RecursiveMode, Watcher};
 
 use crate::auth::credentials;
 use crate::auth::github_api;
+use crate::cdv::CommitDiffViewModel;
 use crate::git::GitRepo;
 use crate::git::models::{Branch, Commit, Remote, RepoStatus, Stash, Tag};
 use crate::state::{GitHubActionRun, GitHubPackage, GitHubPullRequest, GitHubRelease};
@@ -69,6 +70,7 @@ pub enum RepoLiveEvent {
         email: String,
         signature: Option<crate::git::models::CommitSignatureInfo>,
         files: Vec<crate::git::models::FileStatus>,
+        diff: Option<CommitDiffViewModel>,
     },
 }
 

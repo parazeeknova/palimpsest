@@ -5,6 +5,7 @@ use egui_phosphor::regular::{
 };
 use std::collections::BTreeMap;
 
+use crate::cdv;
 use crate::git::models::{FileChangeKind, FileStatus};
 use crate::state::AppState;
 
@@ -46,6 +47,7 @@ pub enum CommitDrawerTab {
 pub struct State {
     pub tab: CommitDrawerTab,
     tree_state: TreeState,
+    diff_state: cdv::DiffTimelineState,
     pub height: f32,
     pub detached: bool,
 }
@@ -80,6 +82,7 @@ impl Default for State {
         Self {
             tab: CommitDrawerTab::Commit,
             tree_state: TreeState::default(),
+            diff_state: cdv::DiffTimelineState::default(),
             height: 240.0,
             detached: false,
         }
@@ -103,6 +106,7 @@ pub fn show(
     commit: Option<&CommitDrawerCommit>,
     signature: Option<&CommitDrawerSignature>,
     files: &[FileStatus],
+    diff: Option<&cdv::CommitDiffViewModel>,
     vertical: bool,
 ) -> CommitDrawerResponse {
     let fill = egui::Color32::from_rgb(36, 36, 36);
@@ -236,9 +240,14 @@ pub fn show(
                     CommitDrawerTab::Commit => {
                         paint_commit_tab(ui, commit, signature, files, app_state, muted)
                     }
-                    CommitDrawerTab::Changes => {
-                        paint_changes_tab(ui, files, commit.populated, muted)
-                    }
+                    CommitDrawerTab::Changes => paint_changes_tab(
+                        ui,
+                        &mut state.diff_state,
+                        files,
+                        commit.populated,
+                        diff,
+                        muted,
+                    ),
                     CommitDrawerTab::FileTree => {
                         paint_tree_tab(ui, &mut state.tree_state, files, commit.populated, muted)
                     }
@@ -301,8 +310,10 @@ fn paint_commit_tab(
 
 fn paint_changes_tab(
     ui: &mut egui::Ui,
+    diff_state: &mut cdv::DiffTimelineState,
     files: &[FileStatus],
     populated: bool,
+    diff: Option<&cdv::CommitDiffViewModel>,
     muted: egui::Color32,
 ) {
     if !populated {
@@ -313,33 +324,37 @@ fn paint_changes_tab(
         );
         return;
     }
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(format!("{} files changed", files.len()))
-                .size(10.0)
-                .color(muted),
-        );
-        let (additions, deletions) = file_totals(files);
-        ui.label(
-            egui::RichText::new(format!("+{}", additions))
-                .size(10.0)
-                .color(egui::Color32::from_rgb(78, 190, 116)),
-        );
-        ui.label(
-            egui::RichText::new(format!("-{}", deletions))
-                .size(10.0)
-                .color(egui::Color32::from_rgb(230, 92, 92)),
-        );
-    });
-    ui.add_space(8.0);
-    if files.is_empty() {
-        ui.label(
-            egui::RichText::new("No file changes")
-                .size(10.0)
-                .color(muted),
-        );
+    if let Some(diff) = diff {
+        cdv::show(ui, diff_state, Some(diff));
     } else {
-        paint_changes_list(ui, files, muted);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{} files changed", files.len()))
+                    .size(10.0)
+                    .color(muted),
+            );
+            let (additions, deletions) = file_totals(files);
+            ui.label(
+                egui::RichText::new(format!("+{}", additions))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(78, 190, 116)),
+            );
+            ui.label(
+                egui::RichText::new(format!("-{}", deletions))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(230, 92, 92)),
+            );
+        });
+        ui.add_space(8.0);
+        if files.is_empty() {
+            ui.label(
+                egui::RichText::new("No file changes")
+                    .size(10.0)
+                    .color(muted),
+            );
+        } else {
+            paint_changes_list(ui, files, muted);
+        }
     }
 }
 

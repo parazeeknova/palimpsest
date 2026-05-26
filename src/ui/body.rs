@@ -23,15 +23,6 @@ const MIN_AUTHOR_WIDTH: f32 = 150.0;
 const MIN_HASH_WIDTH: f32 = 86.0;
 const MIN_DATE_WIDTH: f32 = 150.0;
 
-const BRANCH_COLORS: [egui::Color32; 6] = [
-    egui::Color32::from_rgb(255, 165, 16),
-    egui::Color32::from_rgb(238, 202, 34),
-    egui::Color32::from_rgb(255, 45, 72),
-    egui::Color32::from_rgb(151, 113, 73),
-    egui::Color32::from_rgb(42, 167, 222),
-    egui::Color32::from_rgb(56, 193, 114),
-];
-
 #[derive(Clone, Debug)]
 enum CurveKind {
     Merge,
@@ -54,7 +45,7 @@ enum CommitLineSegment {
 struct CommitLine {
     child_column: usize,
     full_interval: Range<usize>,
-    color_idx: usize,
+    color: egui::Color32,
     segments: Vec<CommitLineSegment>,
 }
 
@@ -66,7 +57,7 @@ enum LaneState {
         child: usize,
         #[allow(dead_code)]
         parent: usize,
-        color: Option<usize>,
+        color: Option<egui::Color32>,
         starting_row: usize,
         starting_col: usize,
         destination_column: Option<usize>,
@@ -84,7 +75,7 @@ impl LaneState {
         ending_row: usize,
         lane_column: usize,
         parent_column: usize,
-        parent_color: usize,
+        parent_color: egui::Color32,
     ) -> Option<CommitLine> {
         match self {
             LaneState::Active {
@@ -187,10 +178,139 @@ impl LaneState {
                     }
                 }
 
+                for segment in segments.iter_mut() {
+                    match segment {
+                        CommitLineSegment::Straight { to_row } => {
+                            if *to_row == usize::MAX {
+                                *to_row = ending_row;
+                            }
+                        }
+                        CommitLineSegment::Curve {
+                            on_row, to_column, ..
+                        } => {
+                            if *on_row == usize::MAX {
+                                *on_row = ending_row;
+                            }
+                            if *to_column == usize::MAX {
+                                *to_column = final_destination;
+                            }
+                        }
+                    }
+                }
+
+                let mut i = 0;
+                while i + 1 < segments.len() {
+                    let next = segments[i + 1].clone();
+                    let current = segments[i].clone();
+
+                    let can_merge = match (&current, &next) {
+                        (
+                            CommitLineSegment::Straight { to_row: r1 },
+                            CommitLineSegment::Straight { to_row: r2 },
+                        ) => {
+                            let end = *r1.max(r2);
+                            segments[i] = CommitLineSegment::Straight { to_row: end };
+                            true
+                        }
+                        _ => false,
+                    };
+
+                    if can_merge {
+                        segments.remove(i + 1);
+                    } else {
+                        if let CommitLineSegment::Curve {
+                            on_row,
+                            to_column,
+                            curve_kind: _,
+                        } = current
+                        {
+                            if on_row < ending_row {
+                                if to_column != final_destination {
+                                    segments.insert(
+                                        i + 1,
+                                        CommitLineSegment::Straight {
+                                            to_row: ending_row - 1,
+                                        },
+                                    );
+                                    segments.insert(
+                                        i + 2,
+                                        CommitLineSegment::Curve {
+                                            to_column: final_destination,
+                                            on_row: ending_row,
+                                            curve_kind: CurveKind::Checkout,
+                                        },
+                                    );
+                                    i += 2;
+                                } else {
+                                    segments.insert(
+                                        i + 1,
+                                        CommitLineSegment::Straight { to_row: ending_row },
+                                    );
+                                    i += 1;
+                                }
+                            } else if to_column != final_destination {
+                                segments.insert(
+                                    i + 1,
+                                    CommitLineSegment::Curve {
+                                        to_column: final_destination,
+                                        on_row: ending_row,
+                                        curve_kind: CurveKind::Checkout,
+                                    },
+                                );
+                                i += 1;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+
+                if let Some(last) = segments.last_mut() {
+                    match last {
+                        CommitLineSegment::Straight { to_row } => {
+                            if *to_row < ending_row {
+                                if final_destination != lane_column {
+                                    segments.push(CommitLineSegment::Curve {
+                                        to_column: final_destination,
+                                        on_row: ending_row,
+                                        curve_kind: CurveKind::Checkout,
+                                    });
+                                } else {
+                                    *to_row = ending_row;
+                                }
+                            }
+                        }
+                        CommitLineSegment::Curve {
+                            on_row, to_column, ..
+                        } => {
+                            if *on_row < ending_row {
+                                if *to_column != final_destination {
+                                    segments.push(CommitLineSegment::Straight {
+                                        to_row: ending_row - 1,
+                                    });
+                                    segments.push(CommitLineSegment::Curve {
+                                        to_column: final_destination,
+                                        on_row: ending_row,
+                                        curve_kind: CurveKind::Checkout,
+                                    });
+                                } else {
+                                    segments
+                                        .push(CommitLineSegment::Straight { to_row: ending_row });
+                                }
+                            } else if *to_column != final_destination {
+                                segments.push(CommitLineSegment::Curve {
+                                    to_column: final_destination,
+                                    on_row: ending_row,
+                                    curve_kind: CurveKind::Checkout,
+                                });
+                            }
+                        }
+                    }
+                }
+
                 Some(CommitLine {
                     child_column: starting_col,
                     full_interval: starting_row..ending_row,
-                    color_idx: final_color,
+                    color: final_color,
                     segments,
                 })
             }
@@ -202,7 +322,7 @@ impl LaneState {
 struct CommitEntry {
     data: CachedCommit,
     lane: usize,
-    color_idx: usize,
+    color: egui::Color32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -229,19 +349,20 @@ struct TopStatusRow {
     label: String,
     detail: String,
     graph_lane: Option<usize>,
-    color_idx: Option<usize>,
+    color: Option<egui::Color32>,
     show_ref_chip: bool,
     show_graph_node: bool,
 }
 
 struct GraphData {
     lane_states: Vec<LaneState>,
-    lane_colors: HashMap<usize, usize>,
+    lane_colors: HashMap<usize, egui::Color32>,
     parent_to_lanes: HashMap<usize, Vec<usize>>,
     next_color: usize,
     commits: Vec<CommitEntry>,
     max_lanes: usize,
     lines: Vec<CommitLine>,
+    branches: Vec<CachedBranch>,
 }
 
 impl GraphData {
@@ -254,6 +375,7 @@ impl GraphData {
             commits: Vec::new(),
             max_lanes: 0,
             lines: Vec::new(),
+            branches: Vec::new(),
         }
     }
 
@@ -263,6 +385,7 @@ impl GraphData {
         self.parent_to_lanes.clear();
         self.commits.clear();
         self.lines.clear();
+        self.branches.clear();
         self.next_color = 0;
         self.max_lanes = 0;
     }
@@ -277,16 +400,32 @@ impl GraphData {
             })
     }
 
-    fn get_lane_color(&mut self, lane_idx: usize) -> usize {
-        let accent_colors_count = BRANCH_COLORS.len();
-        *self.lane_colors.entry(lane_idx).or_insert_with(|| {
-            let color_idx = self.next_color;
-            self.next_color = (self.next_color + 1) % accent_colors_count;
-            color_idx
-        })
+    fn get_lane_color(
+        &mut self,
+        lane_idx: usize,
+        commit: &CachedCommit,
+        branches: &[CachedBranch],
+    ) -> egui::Color32 {
+        let branch_name = branches
+            .iter()
+            .find(|b| b.tip_hash == commit.hash || b.tip_hash == commit.short_hash)
+            .map(|b| b.name.as_str());
+
+        if let Some(name) = branch_name {
+            let color = crate::ui::colors::get_branch_color(name, branches);
+            self.lane_colors.insert(lane_idx, color);
+            color
+        } else {
+            *self.lane_colors.entry(lane_idx).or_insert_with(|| {
+                let golden_ratio_conjugate = 0.618_034_f32;
+                let hue = (lane_idx as f32 * golden_ratio_conjugate).fract();
+                egui::Color32::from(egui::epaint::Hsva::new(hue, 0.75, 0.85, 1.0))
+            })
+        }
     }
 
-    fn add_commits(&mut self, commits: &[CachedCommit]) {
+    fn add_commits(&mut self, commits: &[CachedCommit], branches: &[CachedBranch]) {
+        self.branches = branches.to_vec();
         self.commits.reserve(commits.len());
         self.lines.reserve(commits.len() / 2);
 
@@ -299,7 +438,7 @@ impl GraphData {
                 .and_then(|lanes| lanes.iter().min().copied());
 
             let commit_lane = commit_lane.unwrap_or_else(|| self.first_empty_lane_idx());
-            let commit_color = self.get_lane_color(commit_lane);
+            let commit_color = self.get_lane_color(commit_lane, commit, branches);
 
             if let Some(lanes) = self.parent_to_lanes.remove(&commit_idx) {
                 for lane_column in lanes {
@@ -396,7 +535,7 @@ impl GraphData {
             self.commits.push(CommitEntry {
                 data: commit.clone(),
                 lane: commit_lane,
-                color_idx: commit_color,
+                color: commit_color,
             });
         }
     }
@@ -441,6 +580,7 @@ pub struct State {
     pub selected_commit_cache: Option<commit_drawer::CommitDrawerCommit>,
     pub selected_commit_signature_cache: Option<commit_drawer::CommitDrawerSignature>,
     pub selected_commit_files_cache: Vec<crate::git::models::FileStatus>,
+    pub selected_commit_diff_cache: Option<crate::cdv::CommitDiffViewModel>,
     pub drawer_state: commit_drawer::State,
     pub layout: CommitDrawerLayout,
     refs_fingerprint: Option<RefsFingerprint>,
@@ -467,6 +607,7 @@ impl Default for State {
             selected_commit_cache: None,
             selected_commit_signature_cache: None,
             selected_commit_files_cache: Vec::new(),
+            selected_commit_diff_cache: None,
             drawer_state: commit_drawer::State::default(),
             layout: CommitDrawerLayout::default(),
             refs_fingerprint: None,
@@ -508,6 +649,7 @@ impl State {
             self.selected_commit_cache = None;
             self.selected_commit_signature_cache = None;
             self.selected_commit_files_cache.clear();
+            self.selected_commit_diff_cache = None;
             self.selected_commit_cache_populated_with_repo = false;
             self.selected_commit_cache_repo = None;
             return;
@@ -526,6 +668,7 @@ impl State {
             self.selected_commit_cache = None;
             self.selected_commit_signature_cache = None;
             self.selected_commit_files_cache.clear();
+            self.selected_commit_diff_cache = None;
             self.selected_commit_cache_populated_with_repo = false;
             self.selected_commit_cache_repo = None;
             self.selected_row = None;
@@ -549,6 +692,7 @@ impl State {
         });
         self.selected_commit_signature_cache = None;
         self.selected_commit_files_cache.clear();
+        self.selected_commit_diff_cache = None;
 
         if git_repo.is_some() {
             let Some(repo_path) = app_state.current_repo.clone() else {
@@ -567,6 +711,7 @@ impl State {
                         .unwrap_or_default();
                     let signature = repo.commit_signature_info(&hash).ok().flatten();
                     let files = repo.commit_files(&hash).unwrap_or_default();
+                    let diff = repo.commit_diff_view(&hash).ok();
 
                     let _ = repo_live_tx.send(RepoLiveEvent::CommitDetails {
                         path: repo_path,
@@ -574,6 +719,7 @@ impl State {
                         email,
                         signature,
                         files,
+                        diff,
                     });
                     ctx.request_repaint();
                 }
@@ -715,14 +861,14 @@ fn build_top_status_row(app_state: &AppState, graph_data: &GraphData) -> Option<
         return None;
     }
 
-    let (graph_lane, color_idx) = app_state
+    let (graph_lane, color) = app_state
         .cached_branches
         .iter()
         .find(|branch| branch.is_current)
         .and_then(|branch| {
             commit_row_for_hash(graph_data, branch.tip_hash.as_str()).map(|row| {
                 let entry = &graph_data.commits[row];
-                (Some(entry.lane), Some(entry.color_idx))
+                (Some(entry.lane), Some(entry.color))
             })
         })
         .unwrap_or((None, None));
@@ -739,7 +885,7 @@ fn build_top_status_row(app_state: &AppState, graph_data: &GraphData) -> Option<
         label: "WIP".to_string(),
         detail,
         graph_lane,
-        color_idx,
+        color,
         show_ref_chip: status.unstaged_count == 0,
         show_graph_node: status.unstaged_count > 0,
     })
@@ -764,7 +910,9 @@ pub fn show_cached(
     if graph_commits_changed {
         state.graph_data.clear();
         if !app_state.cached_commits.is_empty() {
-            state.graph_data.add_commits(&app_state.cached_commits);
+            state
+                .graph_data
+                .add_commits(&app_state.cached_commits, &app_state.cached_branches);
         }
         if let Some(ref hash) = state.selected_commit_hash {
             let found_idx = state
@@ -833,6 +981,7 @@ pub fn show_cached(
         state.selected_commit_cache = None;
         state.selected_commit_signature_cache = None;
         state.selected_commit_files_cache.clear();
+        state.selected_commit_diff_cache = None;
         state.selected_commit_cache_populated_with_repo = false;
         state.selected_commit_cache_repo = None;
         state.selected_row = None;
@@ -979,6 +1128,7 @@ pub fn show_cached(
                     Some(selected),
                     state.selected_commit_signature_cache.as_ref(),
                     &state.selected_commit_files_cache,
+                    state.selected_commit_diff_cache.as_ref(),
                     state.layout == CommitDrawerLayout::Vertical,
                 ) {
                     commit_drawer::CommitDrawerResponse::Close => {
@@ -1022,6 +1172,7 @@ pub fn show_cached(
                                 Some(selected),
                                 state.selected_commit_signature_cache.as_ref(),
                                 &state.selected_commit_files_cache,
+                                state.selected_commit_diff_cache.as_ref(),
                                 state.layout == CommitDrawerLayout::Vertical,
                             ) {
                                 commit_drawer::CommitDrawerResponse::Close => {
@@ -1375,11 +1526,9 @@ fn paint_top_status_row(
         .rect_filled(row, 0.0, egui::Color32::from_rgb(42, 42, 42));
 
     if top_status_row.show_graph_node {
-        if let (Some(lane), Some(color_idx)) = (top_status_row.graph_lane, top_status_row.color_idx)
-        {
+        if let (Some(lane), Some(color)) = (top_status_row.graph_lane, top_status_row.color) {
             let graph_center_x = lane_center_x(columns.graph, lane);
             let graph_center_y = row.center().y;
-            let color = BRANCH_COLORS[color_idx % BRANCH_COLORS.len()];
             draw_wip_connector(
                 ui,
                 graph_center_x,
@@ -1651,7 +1800,7 @@ fn paint_ref_badges(
         }
 
         for (badge, chip_rect) in visible_chips.into_iter().rev() {
-            paint_ref_chip(ui, chip_rect, &badge, color_for_ref(&badge));
+            paint_ref_chip(ui, chip_rect, &badge, color_for_ref(&badge, graph_data));
         }
 
         if has_extra {
@@ -1770,7 +1919,7 @@ fn paint_ref_connector(
         return;
     };
 
-    let connector_color = color_for_ref(badge).linear_multiply(0.4);
+    let connector_color = color_for_ref(badge, graph_data).linear_multiply(0.4);
     let commit_x = lane_center_x(graph_rect, commit_entry.lane);
     let row_center = (chip_rect.center().y * 2.0).round() / 2.0;
     let start_x = chip_rect.right() + 2.0;
@@ -1793,14 +1942,49 @@ fn paint_ref_connector(
     );
 }
 
+fn paint_gradient_rect(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    left_color: egui::Color32,
+    right_color: egui::Color32,
+) {
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.left_top(),
+        uv: egui::Pos2::ZERO,
+        color: left_color,
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.right_top(),
+        uv: egui::Pos2::ZERO,
+        color: right_color,
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.right_bottom(),
+        uv: egui::Pos2::ZERO,
+        color: right_color,
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.left_bottom(),
+        uv: egui::Pos2::ZERO,
+        color: left_color,
+    });
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(mesh);
+}
+
 fn paint_ref_chip(ui: &mut egui::Ui, rect: egui::Rect, badge: &RefBadge, accent: egui::Color32) {
-    let fill = if badge.highlighted {
-        accent.linear_multiply(0.25)
-    } else {
-        egui::Color32::from_rgb(52, 52, 52)
-    };
-    // 1. Draw overall badge background
-    ui.painter().rect_filled(rect, 3.0, fill);
+    // 1. Draw base dark background for the badge
+    ui.painter()
+        .rect_filled(rect, 3.0, egui::Color32::from_rgb(46, 46, 46));
+
+    // 2. Draw left-to-right gradient overlay
+    let left_alpha = if badge.highlighted { 90 } else { 45 };
+    let left_color =
+        egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), left_alpha);
+    let right_color = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 0);
+    paint_gradient_rect(ui, rect, left_color, right_color);
 
     // 2. Draw solid opaque background for the icon area (left part)
     let icon_bg_width = if badge.kind == RefKind::Branch && badge.has_local {
@@ -1955,11 +2139,11 @@ fn paint_ref_chip(ui: &mut egui::Ui, rect: egui::Rect, badge: &RefBadge, accent:
     }
 }
 
-fn color_for_ref(badge: &RefBadge) -> egui::Color32 {
+fn color_for_ref(badge: &RefBadge, graph_data: &GraphData) -> egui::Color32 {
     match badge.kind {
-        RefKind::Branch => egui::Color32::from_rgb(76, 167, 255),
-        RefKind::Tag => egui::Color32::from_rgb(173, 132, 255),
-        RefKind::Release => egui::Color32::from_rgb(255, 110, 180), // Sleek pink/red for Releases
+        RefKind::Branch => crate::ui::colors::get_branch_color(&badge.label, &graph_data.branches),
+        RefKind::Tag => crate::ui::colors::get_tag_color(&badge.label),
+        RefKind::Release => egui::Color32::from_rgb(255, 110, 180),
     }
 }
 
@@ -1978,7 +2162,7 @@ fn paint_graph(
     for (row_idx, entry) in state.graph_data.commits.iter().enumerate() {
         let center_x = lane_center_x(graph_rect, entry.lane);
         let center_y = row_center_y(content_rect, row_idx + row_offset, row_height);
-        let color = BRANCH_COLORS[entry.color_idx % BRANCH_COLORS.len()];
+        let color = entry.color;
 
         draw_commit_circle(ui, center_x, center_y, color);
     }
@@ -1992,7 +2176,7 @@ fn paint_commit_line(
     row_offset: usize,
     row_height: f32,
 ) {
-    let color = BRANCH_COLORS[line.color_idx % BRANCH_COLORS.len()];
+    let color = line.color;
     let stroke = egui::Stroke::new(LINE_WIDTH, color);
 
     let mut current_column = line.child_column;
@@ -2159,7 +2343,7 @@ fn paint_vertical_commit_row(
         let image = egui::Image::new(uri).corner_radius(2.0);
         image.paint_at(ui, avatar);
     } else {
-        let avatar_color = BRANCH_COLORS[entry.color_idx % BRANCH_COLORS.len()];
+        let avatar_color = entry.color;
         ui.painter().rect_filled(avatar, 2.0, avatar_color);
 
         let initials: String = entry
@@ -2297,7 +2481,12 @@ fn paint_vertical_commit_row(
                 egui::pos2(current_badge_x, bottom_center_y - chip_height * 0.5),
                 egui::vec2(width, chip_height),
             );
-            paint_ref_chip(ui, chip_rect, badge, color_for_ref(badge));
+            paint_ref_chip(
+                ui,
+                chip_rect,
+                badge,
+                color_for_ref(badge, &state.graph_data),
+            );
             current_badge_x += width + 6.0;
         } else {
             // Cannot fit this badge. Draw +N for all remaining
@@ -2438,7 +2627,7 @@ fn draw_author_cell(
         let image = egui::Image::new(uri).corner_radius(2.0);
         image.paint_at(ui, avatar);
     } else {
-        let avatar_color = BRANCH_COLORS[entry.color_idx % BRANCH_COLORS.len()];
+        let avatar_color = entry.color;
         ui.painter().rect_filled(avatar, 2.0, avatar_color);
 
         let initials: String = entry

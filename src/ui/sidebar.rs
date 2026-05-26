@@ -11,6 +11,7 @@ pub const SIDEBAR_WIDTH: f32 = 236.0;
 const HEADER_HEIGHT: f32 = 30.0;
 const ROW_HEIGHT: f32 = 24.0;
 const FILTER_HEIGHT: f32 = 26.0;
+use crate::ui::colors::get_branch_color;
 
 pub struct SidebarState {
     pub branches_expanded: bool,
@@ -101,7 +102,7 @@ pub fn show_cached(
     let remote: Vec<_> = app_state
         .cached_branches
         .iter()
-        .filter(|b| b.is_remote)
+        .filter(|b| b.is_remote && !b.name.ends_with("/HEAD"))
         .collect();
 
     let mut action = None;
@@ -208,6 +209,10 @@ pub fn show_cached(
                                     muted,
                                     None,
                                     &format!("local_{}", branch.name),
+                                    Some(get_branch_color(
+                                        &branch.name,
+                                        &app_state.cached_branches,
+                                    )),
                                 );
 
                                 if response.double_clicked() {
@@ -258,6 +263,10 @@ pub fn show_cached(
                                     muted,
                                     None,
                                     &format!("remote_{}", branch.name),
+                                    Some(get_branch_color(
+                                        &branch.name,
+                                        &app_state.cached_branches,
+                                    )),
                                 );
                                 local_y += ROW_HEIGHT;
                             }
@@ -292,6 +301,7 @@ pub fn show_cached(
                                     muted,
                                     None,
                                     &format!("tag_{}", tag.name),
+                                    None,
                                 );
                                 local_y += ROW_HEIGHT;
                             }
@@ -324,6 +334,7 @@ pub fn show_cached(
                                     muted,
                                     Some((&stash.hash, muted)),
                                     &format!("stash_{}", stash.hash),
+                                    None,
                                 );
 
                                 response.context_menu(|ui| {
@@ -373,6 +384,7 @@ pub fn show_cached(
                                     muted,
                                     None,
                                     &format!("pr_{}", pr.number),
+                                    None,
                                 );
                                 if response.clicked() {
                                     action = Some(SidebarAction::OpenUrl(pr.html_url.clone()));
@@ -413,6 +425,7 @@ pub fn show_cached(
                                     muted,
                                     Some((&run.head_branch, muted)),
                                     &format!("run_{}", run.id),
+                                    None,
                                 );
                                 if response.clicked() {
                                     action = Some(SidebarAction::OpenUrl(run.html_url.clone()));
@@ -449,6 +462,7 @@ pub fn show_cached(
                                     muted,
                                     None,
                                     &format!("release_{}", release.tag_name),
+                                    None,
                                 );
                                 if response.clicked() {
                                     action = Some(SidebarAction::OpenUrl(release.html_url.clone()));
@@ -484,6 +498,7 @@ pub fn show_cached(
                                     muted,
                                     Some((&pkg.package_type, muted)),
                                     &format!("package_{}", pkg.name),
+                                    None,
                                 );
                                 if response.clicked() {
                                     action = Some(SidebarAction::OpenUrl(pkg.html_url.clone()));
@@ -681,6 +696,7 @@ fn paint_tree_row(
     muted: egui::Color32,
     trailing: Option<(&str, egui::Color32)>,
     id_salt: &str,
+    bg_gradient_color: Option<egui::Color32>,
 ) -> egui::Response {
     let row = row_rect(rect, y, ROW_HEIGHT);
     let response = ui.interact(
@@ -689,7 +705,22 @@ fn paint_tree_row(
         egui::Sense::click(),
     );
 
-    if response.hovered() {
+    if let Some(base_color) = bg_gradient_color {
+        let alpha = if response.hovered() { 50 } else { 20 };
+        let left_color = egui::Color32::from_rgba_unmultiplied(
+            base_color.r(),
+            base_color.g(),
+            base_color.b(),
+            alpha,
+        );
+        let right_color = egui::Color32::from_rgba_unmultiplied(
+            base_color.r(),
+            base_color.g(),
+            base_color.b(),
+            0,
+        );
+        paint_gradient_rect(ui, row, left_color, right_color);
+    } else if response.hovered() {
         ui.painter().rect_filled(
             row,
             0.0,
@@ -767,4 +798,36 @@ fn painter_text(
 ) {
     ui.painter()
         .text(pos, align, text, egui::FontId::proportional(size), color);
+}
+
+fn paint_gradient_rect(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    left_color: egui::Color32,
+    right_color: egui::Color32,
+) {
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.left_top(),
+        uv: egui::Pos2::ZERO,
+        color: left_color,
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.right_top(),
+        uv: egui::Pos2::ZERO,
+        color: right_color,
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.right_bottom(),
+        uv: egui::Pos2::ZERO,
+        color: right_color,
+    });
+    mesh.vertices.push(egui::epaint::Vertex {
+        pos: rect.left_bottom(),
+        uv: egui::Pos2::ZERO,
+        color: left_color,
+    });
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    ui.painter().add(mesh);
 }

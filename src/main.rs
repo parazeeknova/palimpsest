@@ -434,6 +434,7 @@ impl PalimpsestApp {
                     email,
                     signature,
                     files,
+                    diff,
                 } => {
                     if self.store.get_state().current_repo.as_deref() == Some(&path)
                         && self.body_state.selected_commit_hash.as_ref() == Some(&hash)
@@ -451,6 +452,7 @@ impl PalimpsestApp {
                             }
                         });
                         self.body_state.selected_commit_files_cache = files;
+                        self.body_state.selected_commit_diff_cache = diff;
                         changed = true;
                     }
                 }
