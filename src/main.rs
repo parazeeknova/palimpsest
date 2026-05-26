@@ -225,6 +225,10 @@ impl PalimpsestApp {
             new_stash_message: String::new(),
         };
 
+        let app_state = app.store.get_state();
+        app.body_state.layout = app_state.commit_drawer_layout;
+        app.body_state.drawer_state.height = app_state.commit_drawer_height;
+
         app.restore_active_repo_from_state();
         app.persist_session();
         app
@@ -2107,13 +2111,24 @@ impl eframe::App for PalimpsestApp {
                 self.new_branch_name.clear();
             }
             toolbar::ToolbarAction::SetDrawerLayoutHorizontal => {
+                tracing::info!("Switching commit drawer layout to Horizontal");
+                self.store.dispatch(AppAction::SetCommitDrawerLayout(
+                    body::CommitDrawerLayout::Horizontal,
+                ));
                 self.body_state.layout = body::CommitDrawerLayout::Horizontal;
+                self.persist_session();
             }
             toolbar::ToolbarAction::SetDrawerLayoutVertical => {
+                tracing::info!("Switching commit drawer layout to Vertical");
+                self.store.dispatch(AppAction::SetCommitDrawerLayout(
+                    body::CommitDrawerLayout::Vertical,
+                ));
                 self.body_state.layout = body::CommitDrawerLayout::Vertical;
                 if self.body_state.drawer_state.height == 240.0 {
+                    self.store.dispatch(AppAction::SetCommitDrawerHeight(450.0));
                     self.body_state.drawer_state.height = 450.0;
                 }
+                self.persist_session();
             }
             toolbar::ToolbarAction::None => {}
         }
@@ -2438,6 +2453,18 @@ impl eframe::App for PalimpsestApp {
                     )
                 },
             );
+
+            let new_height = self.body_state.drawer_state.height;
+            if new_height != state.commit_drawer_height {
+                tracing::info!(
+                    old_height = state.commit_drawer_height,
+                    new_height = new_height,
+                    "Commit drawer height resized"
+                );
+                self.store
+                    .dispatch(AppAction::SetCommitDrawerHeight(new_height));
+                self.persist_session();
+            }
 
             if let Some(action) = self.commit_panel_state.pending_action.take() {
                 self.handle_commit_action(action);

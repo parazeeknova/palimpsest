@@ -11,6 +11,7 @@ use crate::ui::commit_panel;
 
 const HEADER_HEIGHT: f32 = 30.0;
 const ROW_HEIGHT: f32 = 28.0;
+const VERTICAL_ROW_HEIGHT: f32 = 44.0;
 const REFS_GUTTER_WIDTH: f32 = 154.0;
 const LANE_WIDTH: f32 = 16.0;
 const LEFT_PADDING: f32 = 12.0;
@@ -411,7 +412,7 @@ struct RefsFingerprint {
     status_unstaged_count: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CommitDrawerLayout {
     #[default]
     Horizontal,
@@ -783,19 +784,34 @@ pub fn show_cached(
         let logo_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(200.0, 200.0));
         ui.put(logo_rect, logo);
     } else {
+        let is_vertical = state.layout == CommitDrawerLayout::Vertical;
+        let header_height = if is_vertical { 0.0 } else { HEADER_HEIGHT };
         let header_rect =
-            egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), HEADER_HEIGHT));
-        ui.painter()
-            .rect_filled(header_rect.expand2(egui::vec2(0.0, 1.0)), 0.0, header_bg);
-        ui.painter().line_segment(
-            [header_rect.left_bottom(), header_rect.right_bottom()],
-            stroke,
-        );
+            egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), header_height));
 
-        clamp_columns(state, rect.width());
-        let total_width = total_content_width(state).max(rect.width());
-        let columns = columns_for(header_rect, state, total_width);
-        paint_header(ui, header_rect, &columns, state, stroke);
+        if !is_vertical {
+            ui.painter()
+                .rect_filled(header_rect.expand2(egui::vec2(0.0, 1.0)), 0.0, header_bg);
+            ui.painter().line_segment(
+                [header_rect.left_bottom(), header_rect.right_bottom()],
+                stroke,
+            );
+            clamp_columns(state, rect.width());
+        }
+
+        let total_width = if is_vertical {
+            rect.width()
+        } else {
+            total_content_width(state).max(rect.width())
+        };
+
+        let _columns = if is_vertical {
+            columns_for_vertical(header_rect, state)
+        } else {
+            let cols = columns_for(header_rect, state, total_width);
+            paint_header(ui, header_rect, &cols, state, stroke);
+            cols
+        };
 
         let rows_rect = egui::Rect::from_min_max(
             egui::pos2(rect.left(), header_rect.bottom()),
@@ -838,22 +854,41 @@ pub fn show_cached(
                 .max_rect(list_rect)
                 .layout(egui::Layout::top_down(egui::Align::Min)),
             |ui| {
-                egui::ScrollArea::both()
+                let scroll = if is_vertical {
+                    egui::ScrollArea::vertical()
+                } else {
+                    egui::ScrollArea::both()
+                };
+                scroll
                     .id_salt("commit_body_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let extra_row_height = if state.top_status_row.is_some() {
+                        let row_height = if is_vertical {
+                            VERTICAL_ROW_HEIGHT
+                        } else {
                             ROW_HEIGHT
+                        };
+                        let extra_row_height = if state.top_status_row.is_some() {
+                            row_height
                         } else {
                             0.0
                         };
+                        let content_width = if is_vertical {
+                            ui.available_width()
+                        } else {
+                            total_width
+                        };
                         let content_size = egui::vec2(
-                            total_width,
-                            state.graph_data.commits.len() as f32 * ROW_HEIGHT + extra_row_height,
+                            content_width,
+                            state.graph_data.commits.len() as f32 * row_height + extra_row_height,
                         );
                         let (content_rect, _) =
                             ui.allocate_exact_size(content_size, egui::Sense::hover());
-                        let columns = columns_for(content_rect, state, total_width);
+                        let columns = if is_vertical {
+                            columns_for_vertical(content_rect, state)
+                        } else {
+                            columns_for(content_rect, state, total_width)
+                        };
                         paint_rows(ui, content_rect, &columns, state, app_state);
                     });
             },
@@ -1089,6 +1124,21 @@ fn columns_for(rect: egui::Rect, state: &State, total_width: f32) -> Columns {
     }
 }
 
+fn columns_for_vertical(rect: egui::Rect, state: &State) -> Columns {
+    let graph = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.top()),
+        egui::vec2(graph_width(state), rect.height()),
+    );
+    Columns {
+        graph,
+        refs: egui::Rect::ZERO,
+        subject: egui::Rect::ZERO,
+        author: egui::Rect::ZERO,
+        hash: egui::Rect::ZERO,
+        date: egui::Rect::ZERO,
+    }
+}
+
 fn paint_header(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -1156,8 +1206,8 @@ fn lane_center_x(graph_rect: egui::Rect, lane: usize) -> f32 {
     graph_rect.left() + LEFT_PADDING + lane as f32 * LANE_WIDTH + LANE_WIDTH / 2.0
 }
 
-fn row_center_y(content_rect: egui::Rect, row: usize) -> f32 {
-    content_rect.top() + row as f32 * ROW_HEIGHT + ROW_HEIGHT / 2.0
+fn row_center_y(content_rect: egui::Rect, row: usize, row_height: f32) -> f32 {
+    content_rect.top() + row as f32 * row_height + row_height / 2.0
 }
 
 fn paint_rows(
@@ -1167,15 +1217,32 @@ fn paint_rows(
     state: &mut State,
     app_state: &AppState,
 ) {
+    let is_vertical = state.layout == CommitDrawerLayout::Vertical;
+    let row_height = if is_vertical {
+        VERTICAL_ROW_HEIGHT
+    } else {
+        ROW_HEIGHT
+    };
     let has_top_row = state.top_status_row.is_some();
     let row_offset = usize::from(has_top_row);
 
     if let Some(top_status_row) = &state.top_status_row {
-        paint_top_status_row(ui, content_rect, columns, top_status_row);
+        paint_top_status_row(
+            ui,
+            content_rect,
+            columns,
+            top_status_row,
+            row_height,
+            is_vertical,
+        );
     }
 
+    let mut refs = Vec::with_capacity(state.branch_refs.len() + state.tag_refs.len());
+    refs.extend(state.branch_refs.iter().cloned());
+    refs.extend(state.tag_refs.iter().cloned());
+
     for (row_idx, entry) in state.graph_data.commits.iter().enumerate() {
-        let row_rect = row_rect(content_rect, row_idx, has_top_row);
+        let row_rect = row_rect(content_rect, row_idx, has_top_row, row_height);
 
         let is_selected = state.selected_row == Some(row_idx);
         let is_hovered = state.hovered_row == Some(row_idx);
@@ -1206,23 +1273,34 @@ fn paint_rows(
             state.hovered_row = None;
         }
 
-        paint_commit_row(ui, row_rect, columns, entry, row_idx, state, app_state);
+        if is_vertical {
+            paint_vertical_commit_row(
+                ui, row_rect, columns, entry, row_idx, state, app_state, &refs,
+            );
+        } else {
+            paint_commit_row(ui, row_rect, columns, entry, row_idx, state, app_state);
+        }
     }
 
-    paint_graph(ui, columns.graph, content_rect, state, row_offset);
-
-    let mut refs = Vec::with_capacity(state.branch_refs.len() + state.tag_refs.len());
-    refs.extend(state.branch_refs.iter().cloned());
-    refs.extend(state.tag_refs.iter().cloned());
-
-    paint_ref_badges(
+    paint_graph(
         ui,
+        columns.graph,
         content_rect,
-        columns,
-        &state.graph_data,
-        &refs,
-        has_top_row,
+        state,
+        row_offset,
+        row_height,
     );
+
+    if !is_vertical {
+        paint_ref_badges(
+            ui,
+            content_rect,
+            columns,
+            &state.graph_data,
+            &refs,
+            has_top_row,
+        );
+    }
 }
 
 fn paint_top_status_row(
@@ -1230,8 +1308,10 @@ fn paint_top_status_row(
     content_rect: egui::Rect,
     columns: &Columns,
     top_status_row: &TopStatusRow,
+    row_height: f32,
+    is_vertical: bool,
 ) {
-    let row = row_rect(content_rect, 0, false);
+    let row = row_rect(content_rect, 0, false, row_height);
     ui.painter()
         .rect_filled(row, 0.0, egui::Color32::from_rgb(42, 42, 42));
 
@@ -1245,59 +1325,114 @@ fn paint_top_status_row(
                 ui,
                 graph_center_x,
                 graph_center_y + WIP_NODE_RADIUS,
-                graph_center_y + ROW_HEIGHT - WIP_NODE_RADIUS,
+                graph_center_y + row_height - WIP_NODE_RADIUS,
                 color,
             );
             draw_dotted_commit_node(ui, graph_center_x, graph_center_y, color);
         }
     }
 
-    if top_status_row.show_ref_chip {
-        let refs_rect = row.intersect(columns.refs).shrink2(egui::vec2(6.0, 4.0));
-        let accent = egui::Color32::from_rgb(252, 197, 34);
-        let chip_height = 14.0;
-        let chip_rect = egui::Rect::from_min_size(
-            egui::pos2(refs_rect.left(), refs_rect.top()),
-            egui::vec2(48.0, chip_height),
-        );
-        ui.painter()
-            .rect_filled(chip_rect, 3.0, accent.linear_multiply(0.25));
-        ui.painter().rect_stroke(
-            chip_rect,
-            3.0,
-            egui::Stroke::new(1.0_f32, accent),
-            egui::StrokeKind::Inside,
-        );
+    if is_vertical {
+        let details_left = columns.graph.right() + 8.0;
+        let details_right = row.right() - 8.0;
+        let top_center_y = row.top() + 13.0;
+        let bottom_center_y = row.top() + 32.0;
+
+        if top_status_row.show_ref_chip {
+            let chip_width = top_status_row.label.len() as f32 * 5.4 + 20.0;
+            let chip_rect = egui::Rect::from_min_size(
+                egui::pos2(details_left, top_center_y - 7.0),
+                egui::vec2(chip_width, 14.0),
+            );
+            let accent = egui::Color32::from_rgb(252, 197, 34);
+            ui.painter()
+                .rect_filled(chip_rect, 3.0, accent.linear_multiply(0.25));
+            ui.painter().rect_stroke(
+                chip_rect,
+                3.0,
+                egui::Stroke::new(1.0_f32, accent),
+                egui::StrokeKind::Inside,
+            );
+            clipped_text(
+                ui,
+                chip_rect.shrink2(egui::vec2(4.0, 0.0)),
+                egui::pos2(chip_rect.left() + 4.0, chip_rect.center().y),
+                PENCIL_SIMPLE,
+                8.0,
+                accent,
+                egui::Align2::LEFT_CENTER,
+            );
+            clipped_text(
+                ui,
+                chip_rect.shrink2(egui::vec2(4.0, 0.0)),
+                egui::pos2(chip_rect.left() + 14.0, chip_rect.center().y),
+                &top_status_row.label,
+                9.0,
+                ui.visuals().text_color(),
+                egui::Align2::LEFT_CENTER,
+            );
+        }
+
         clipped_text(
             ui,
-            chip_rect.shrink2(egui::vec2(4.0, 0.0)),
-            egui::pos2(chip_rect.left() + 4.0, chip_rect.center().y),
-            PENCIL_SIMPLE,
-            8.0,
-            accent,
+            egui::Rect::from_min_max(
+                egui::pos2(details_left, row.top() + 24.0),
+                egui::pos2(details_right, row.top() + 40.0),
+            ),
+            egui::pos2(details_left, bottom_center_y),
+            &top_status_row.detail,
+            12.0,
+            ui.visuals().text_color(),
             egui::Align2::LEFT_CENTER,
         );
+    } else {
+        if top_status_row.show_ref_chip {
+            let refs_rect = row.intersect(columns.refs).shrink2(egui::vec2(6.0, 4.0));
+            let accent = egui::Color32::from_rgb(252, 197, 34);
+            let chip_height = 14.0;
+            let chip_rect = egui::Rect::from_min_size(
+                egui::pos2(refs_rect.left(), refs_rect.top()),
+                egui::vec2(48.0, chip_height),
+            );
+            ui.painter()
+                .rect_filled(chip_rect, 3.0, accent.linear_multiply(0.25));
+            ui.painter().rect_stroke(
+                chip_rect,
+                3.0,
+                egui::Stroke::new(1.0_f32, accent),
+                egui::StrokeKind::Inside,
+            );
+            clipped_text(
+                ui,
+                chip_rect.shrink2(egui::vec2(4.0, 0.0)),
+                egui::pos2(chip_rect.left() + 4.0, chip_rect.center().y),
+                PENCIL_SIMPLE,
+                8.0,
+                accent,
+                egui::Align2::LEFT_CENTER,
+            );
+            clipped_text(
+                ui,
+                chip_rect.shrink2(egui::vec2(4.0, 0.0)),
+                egui::pos2(chip_rect.left() + 14.0, chip_rect.center().y),
+                &top_status_row.label,
+                9.0,
+                ui.visuals().text_color(),
+                egui::Align2::LEFT_CENTER,
+            );
+        }
+
+        let subject_rect = row.intersect(columns.subject).shrink2(egui::vec2(8.0, 0.0));
         clipped_text(
             ui,
-            chip_rect.shrink2(egui::vec2(4.0, 0.0)),
-            egui::pos2(chip_rect.left() + 14.0, chip_rect.center().y),
-            &top_status_row.label,
-            9.0,
+            subject_rect,
+            egui::pos2(subject_rect.left(), row.center().y),
+            &top_status_row.detail,
+            13.0,
             ui.visuals().text_color(),
             egui::Align2::LEFT_CENTER,
         );
     }
-
-    let subject_rect = row.intersect(columns.subject).shrink2(egui::vec2(8.0, 0.0));
-    clipped_text(
-        ui,
-        subject_rect,
-        egui::pos2(subject_rect.left(), row.center().y),
-        &top_status_row.detail,
-        13.0,
-        ui.visuals().text_color(),
-        egui::Align2::LEFT_CENTER,
-    );
 }
 
 fn draw_dotted_commit_node(ui: &egui::Ui, center_x: f32, center_y: f32, color: egui::Color32) {
@@ -1360,7 +1495,7 @@ fn paint_ref_badges(
     }
 
     for (row_idx, mut badges) in refs_by_row {
-        let row = row_rect(content_rect, row_idx, has_top_row);
+        let row = row_rect(content_rect, row_idx, has_top_row, ROW_HEIGHT);
         let refs_rect = row.intersect(columns.refs).shrink2(egui::vec2(6.0, 4.0));
         let chip_height = 14.0;
 
@@ -1568,14 +1703,15 @@ fn paint_graph(
     content_rect: egui::Rect,
     state: &State,
     row_offset: usize,
+    row_height: f32,
 ) {
     for line in &state.graph_data.lines {
-        paint_commit_line(ui, graph_rect, content_rect, line, row_offset);
+        paint_commit_line(ui, graph_rect, content_rect, line, row_offset, row_height);
     }
 
     for (row_idx, entry) in state.graph_data.commits.iter().enumerate() {
         let center_x = lane_center_x(graph_rect, entry.lane);
-        let center_y = row_center_y(content_rect, row_idx + row_offset);
+        let center_y = row_center_y(content_rect, row_idx + row_offset, row_height);
         let color = BRANCH_COLORS[entry.color_idx % BRANCH_COLORS.len()];
 
         draw_commit_circle(ui, center_x, center_y, color);
@@ -1588,13 +1724,17 @@ fn paint_commit_line(
     content_rect: egui::Rect,
     line: &CommitLine,
     row_offset: usize,
+    row_height: f32,
 ) {
     let color = BRANCH_COLORS[line.color_idx % BRANCH_COLORS.len()];
     let stroke = egui::Stroke::new(LINE_WIDTH, color);
 
     let mut current_column = line.child_column;
-    let mut current_y =
-        row_center_y(content_rect, line.full_interval.start + row_offset) + COMMIT_CIRCLE_RADIUS;
+    let mut current_y = row_center_y(
+        content_rect,
+        line.full_interval.start + row_offset,
+        row_height,
+    ) + COMMIT_CIRCLE_RADIUS;
 
     for (segment_idx, segment) in line.segments.iter().enumerate() {
         let is_last = segment_idx + 1 == line.segments.len();
@@ -1603,7 +1743,7 @@ fn paint_commit_line(
             CommitLineSegment::Straight { to_row } => {
                 let start_x = lane_center_x(graph_rect, current_column);
                 let end_x = lane_center_x(graph_rect, current_column);
-                let mut end_y = row_center_y(content_rect, *to_row + row_offset);
+                let mut end_y = row_center_y(content_rect, *to_row + row_offset, row_height);
                 if is_last {
                     end_y -= COMMIT_CIRCLE_RADIUS;
                 }
@@ -1622,7 +1762,7 @@ fn paint_commit_line(
             } => {
                 let start_x = lane_center_x(graph_rect, current_column);
                 let end_x = lane_center_x(graph_rect, *to_column);
-                let mut end_y = row_center_y(content_rect, *on_row + row_offset);
+                let mut end_y = row_center_y(content_rect, *on_row + row_offset, row_height);
                 if is_last {
                     end_y -= COMMIT_CIRCLE_RADIUS;
                 }
@@ -1717,6 +1857,177 @@ fn draw_commit_circle(ui: &egui::Ui, center_x: f32, center_y: f32, color: egui::
         egui::pos2(center_x, center_y),
         COMMIT_CIRCLE_RADIUS,
         egui::Stroke::new(2.0_f32, color),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_vertical_commit_row(
+    ui: &mut egui::Ui,
+    row: egui::Rect,
+    columns: &Columns,
+    entry: &CommitEntry,
+    row_idx: usize,
+    state: &State,
+    app_state: &AppState,
+    refs: &[RefBadge],
+) {
+    let text = ui.visuals().text_color();
+    let muted = egui::Color32::from_rgb(140, 140, 140);
+    let is_selected = state.selected_row == Some(row_idx);
+    let date_str = format_commit_date_from_secs(entry.data.timestamp_secs);
+
+    let details_left = columns.graph.right() + 8.0;
+    let details_right = row.right() - 8.0;
+    let top_center_y = row.top() + 13.0;
+    let bottom_center_y = row.top() + 32.0;
+
+    // 1. Top row avatar
+    let avatar = egui::Rect::from_center_size(
+        egui::pos2(details_left + 8.0, top_center_y),
+        egui::vec2(16.0, 16.0),
+    );
+    if let Some(path) = app_state.avatar_cache.get(&entry.data.author) {
+        let uri = url::Url::from_file_path(path)
+            .map(|u| u.to_string())
+            .unwrap_or_else(|_| format!("file://{}", path));
+        let image = egui::Image::new(uri).corner_radius(2.0);
+        image.paint_at(ui, avatar);
+    } else {
+        let avatar_color = BRANCH_COLORS[entry.color_idx % BRANCH_COLORS.len()];
+        ui.painter().rect_filled(avatar, 2.0, avatar_color);
+
+        let initials: String = entry
+            .data
+            .author
+            .split_whitespace()
+            .take(2)
+            .map(|w| {
+                w.chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_uppercase()
+                    .next()
+                    .unwrap()
+            })
+            .collect();
+
+        clipped_text(
+            ui,
+            avatar,
+            avatar.center(),
+            &initials,
+            8.0,
+            egui::Color32::WHITE,
+            egui::Align2::CENTER_CENTER,
+        );
+    }
+
+    // 2. Top row Author name, hash, and date
+    // far right date
+    clipped_text(
+        ui,
+        egui::Rect::from_min_max(
+            egui::pos2(details_left + 24.0, row.top()),
+            egui::pos2(details_right, row.top() + 24.0),
+        ),
+        egui::pos2(details_right, top_center_y),
+        &date_str,
+        11.0,
+        muted,
+        egui::Align2::RIGHT_CENTER,
+    );
+
+    // Calculate name and hash limits
+    let date_font = egui::FontId::proportional(11.0);
+    let date_width = ui
+        .painter()
+        .layout_no_wrap(date_str.clone(), date_font, egui::Color32::WHITE)
+        .rect
+        .width();
+
+    let name_x = details_left + 24.0;
+    // name_width is bounded:
+    let max_name_width = ((details_right - date_width - 8.0) - name_x - 65.0).max(40.0);
+    let name_font = egui::FontId::proportional(12.0);
+    let truncated_name = truncate_text_to_width(ui, &entry.data.author, 12.0, max_name_width);
+    let name_width_actual = ui
+        .painter()
+        .layout_no_wrap(truncated_name.clone(), name_font, egui::Color32::WHITE)
+        .rect
+        .width();
+
+    clipped_text(
+        ui,
+        egui::Rect::from_min_max(
+            egui::pos2(name_x, row.top()),
+            egui::pos2(details_right - date_width - 8.0, row.top() + 24.0),
+        ),
+        egui::pos2(name_x, top_center_y),
+        &truncated_name,
+        12.0,
+        if is_selected {
+            text
+        } else {
+            ui.visuals().text_color()
+        },
+        egui::Align2::LEFT_CENTER,
+    );
+
+    let hash_x = name_x + name_width_actual + 8.0;
+    clipped_text(
+        ui,
+        egui::Rect::from_min_max(
+            egui::pos2(hash_x, row.top()),
+            egui::pos2(details_right - date_width - 8.0, row.top() + 24.0),
+        ),
+        egui::pos2(hash_x, top_center_y),
+        &entry.data.short_hash,
+        11.0,
+        muted,
+        egui::Align2::LEFT_CENTER,
+    );
+
+    // 3. Bottom row: Associated Refs and Commit Message
+    let mut row_badges = Vec::new();
+    for badge in refs {
+        if badge.row == Some(row_idx) {
+            row_badges.push(badge.clone());
+        }
+    }
+    row_badges.sort_by(compare_badges_for_display);
+
+    let mut current_badge_x = details_left;
+    let chip_height = 14.0;
+
+    for badge in &row_badges {
+        let max_width = details_right - current_badge_x - 40.0;
+        if max_width < 20.0 {
+            break;
+        }
+        let width = chip_width_for_badge(badge, max_width);
+        let chip_rect = egui::Rect::from_min_size(
+            egui::pos2(current_badge_x, bottom_center_y - chip_height * 0.5),
+            egui::vec2(width, chip_height),
+        );
+        paint_ref_chip(ui, chip_rect, badge, color_for_ref(badge));
+        current_badge_x += width + 6.0;
+    }
+
+    let msg_subject = commit_subject(&entry.data.message);
+    let msg_width = details_right - current_badge_x;
+    let display_msg = truncate_text_to_width(ui, msg_subject, 12.0, msg_width);
+
+    clipped_text(
+        ui,
+        egui::Rect::from_min_max(
+            egui::pos2(current_badge_x, row.top() + 24.0),
+            egui::pos2(details_right, row.top() + 40.0),
+        ),
+        egui::pos2(current_badge_x, bottom_center_y),
+        &display_msg,
+        12.0,
+        if is_selected { text } else { muted },
+        egui::Align2::LEFT_CENTER,
     );
 }
 
@@ -1874,14 +2185,19 @@ fn clipped_text(
     painter.text(pos, align, text, egui::FontId::proportional(size), color);
 }
 
-fn row_rect(content_rect: egui::Rect, index: usize, has_top_row: bool) -> egui::Rect {
+fn row_rect(
+    content_rect: egui::Rect,
+    index: usize,
+    has_top_row: bool,
+    row_height: f32,
+) -> egui::Rect {
     let offset = if has_top_row { 1 } else { 0 };
     egui::Rect::from_min_size(
         egui::pos2(
             content_rect.left(),
-            content_rect.top() + (index + offset) as f32 * ROW_HEIGHT,
+            content_rect.top() + (index + offset) as f32 * row_height,
         ),
-        egui::vec2(content_rect.width(), ROW_HEIGHT),
+        egui::vec2(content_rect.width(), row_height),
     )
 }
 

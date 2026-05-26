@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use zed::{Store, create_reducer};
 
 use crate::git::models::{Branch, Commit, Remote, RepoStatus, Stash, Tag};
+use crate::ui::body::CommitDrawerLayout;
 
 const SESSION_VERSION: u32 = 2;
 const SESSION_FILE_NAME: &str = "session.json";
@@ -32,6 +33,10 @@ pub struct AppSession {
     pub git_user_name: Option<String>,
     #[serde(default)]
     pub git_user_email: Option<String>,
+    #[serde(default)]
+    pub commit_drawer_layout: CommitDrawerLayout,
+    #[serde(default = "default_drawer_height")]
+    pub commit_drawer_height: u32,
 }
 
 impl Default for AppSession {
@@ -46,8 +51,14 @@ impl Default for AppSession {
             setup_completed: false,
             git_user_name: None,
             git_user_email: None,
+            commit_drawer_layout: CommitDrawerLayout::Horizontal,
+            commit_drawer_height: default_drawer_height(),
         }
     }
+}
+
+fn default_drawer_height() -> u32 {
+    240
 }
 
 impl AppSession {
@@ -76,6 +87,8 @@ impl AppSession {
             setup_completed: state.setup_completed,
             git_user_name: state.git_identity.as_ref().and_then(|i| i.name.clone()),
             git_user_email: state.git_identity.as_ref().and_then(|i| i.email.clone()),
+            commit_drawer_layout: state.commit_drawer_layout,
+            commit_drawer_height: state.commit_drawer_height as u32,
         }
         .normalize()
     }
@@ -129,6 +142,8 @@ impl AppSession {
             github_loading: false,
             github_error: None,
             avatar_cache: std::collections::HashMap::new(),
+            commit_drawer_layout: session.commit_drawer_layout,
+            commit_drawer_height: session.commit_drawer_height as f32,
         }
     }
 
@@ -250,6 +265,8 @@ pub struct AppState {
     pub github_error: Option<String>,
     #[serde(skip)]
     pub avatar_cache: std::collections::HashMap<String, String>,
+    pub commit_drawer_layout: CommitDrawerLayout,
+    pub commit_drawer_height: f32,
 }
 
 impl PartialEq for AppState {
@@ -282,6 +299,8 @@ impl PartialEq for AppState {
             && self.github_packages == other.github_packages
             && self.github_loading == other.github_loading
             && self.github_error == other.github_error
+            && self.commit_drawer_layout == other.commit_drawer_layout
+            && self.commit_drawer_height == other.commit_drawer_height
     }
 }
 
@@ -509,6 +528,8 @@ impl Default for AppState {
             github_loading: false,
             github_error: None,
             avatar_cache: std::collections::HashMap::new(),
+            commit_drawer_layout: CommitDrawerLayout::Horizontal,
+            commit_drawer_height: 240.0,
         }
     }
 }
@@ -789,6 +810,8 @@ pub enum AppAction {
         key: String,
         path: String,
     },
+    SetCommitDrawerLayout(CommitDrawerLayout),
+    SetCommitDrawerHeight(f32),
 }
 
 #[derive(Clone, Debug)]
@@ -1000,6 +1023,14 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
                 ..state.clone()
             }
         }
+        AppAction::SetCommitDrawerLayout(layout) => AppState {
+            commit_drawer_layout: *layout,
+            ..state.clone()
+        },
+        AppAction::SetCommitDrawerHeight(height) => AppState {
+            commit_drawer_height: *height,
+            ..state.clone()
+        },
     }
 }
 
@@ -1255,6 +1286,8 @@ mod tests {
             setup_completed: false,
             git_user_name: None,
             git_user_email: None,
+            commit_drawer_layout: CommitDrawerLayout::Horizontal,
+            commit_drawer_height: 240,
         };
 
         let state = session.clone().into_state();
