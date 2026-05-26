@@ -398,6 +398,19 @@ impl GraphData {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RefsFingerprint {
+    branches_len: usize,
+    first_branch_name: Option<String>,
+    tags_len: usize,
+    first_tag_name: Option<String>,
+    releases_len: usize,
+    first_release_name: Option<String>,
+    status_branch: Option<String>,
+    status_staged_count: usize,
+    status_unstaged_count: usize,
+}
+
 pub struct State {
     refs_width: f32,
     subject_width: f32,
@@ -418,6 +431,7 @@ pub struct State {
     pub selected_commit_signature_cache: Option<commit_drawer::CommitDrawerSignature>,
     pub selected_commit_files_cache: Vec<crate::git::models::FileStatus>,
     drawer_state: commit_drawer::State,
+    refs_fingerprint: Option<RefsFingerprint>,
 }
 
 impl Default for State {
@@ -442,6 +456,7 @@ impl Default for State {
             selected_commit_signature_cache: None,
             selected_commit_files_cache: Vec::new(),
             drawer_state: commit_drawer::State::default(),
+            refs_fingerprint: None,
         }
     }
 }
@@ -700,7 +715,36 @@ pub fn show_cached(
         }
     }
 
-    state.refresh_refs(app_state);
+    let current_refs_fp = RefsFingerprint {
+        branches_len: app_state.cached_branches.len(),
+        first_branch_name: app_state.cached_branches.first().map(|b| b.name.clone()),
+        tags_len: app_state.cached_tags.len(),
+        first_tag_name: app_state.cached_tags.first().map(|t| t.name.clone()),
+        releases_len: app_state.github_releases.len(),
+        first_release_name: app_state
+            .github_releases
+            .first()
+            .and_then(|r| r.name.clone()),
+        status_branch: app_state.cached_status.as_ref().map(|s| s.branch.clone()),
+        status_staged_count: app_state
+            .cached_status
+            .as_ref()
+            .map(|s| s.staged_count)
+            .unwrap_or(0),
+        status_unstaged_count: app_state
+            .cached_status
+            .as_ref()
+            .map(|s| s.unstaged_count)
+            .unwrap_or(0),
+    };
+
+    let refs_changed =
+        graph_commits_changed || state.refs_fingerprint.as_ref() != Some(&current_refs_fp);
+
+    if refs_changed {
+        state.refresh_refs(app_state);
+        state.refs_fingerprint = Some(current_refs_fp);
+    }
 
     let rect = ui.available_rect_before_wrap();
     let (rect, _) = ui.allocate_exact_size(rect.size(), egui::Sense::hover());

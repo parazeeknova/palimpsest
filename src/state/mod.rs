@@ -114,6 +114,8 @@ impl AppSession {
                     gpg_sign_commits: false,
                     ssh_key_count: 0,
                     gpg_key_count: 0,
+                    ssh_keys: Vec::new(),
+                    gpg_keys: Vec::new(),
                 })
             } else {
                 None
@@ -469,6 +471,10 @@ pub struct CachedGitIdentity {
     pub gpg_sign_commits: bool,
     pub ssh_key_count: usize,
     pub gpg_key_count: usize,
+    #[serde(default)]
+    pub ssh_keys: Vec<crate::auth::git_identity::SshKeyInfo>,
+    #[serde(default)]
+    pub gpg_keys: Vec<crate::auth::git_identity::GpgKeyInfo>,
 }
 
 impl Default for AppState {
@@ -1209,6 +1215,8 @@ mod tests {
             gpg_sign_commits: false,
             ssh_key_count: 2,
             gpg_key_count: 1,
+            ssh_keys: Vec::new(),
+            gpg_keys: Vec::new(),
         };
         let state = reducer(&state, &AppAction::SetGitIdentity(Some(identity.clone())));
         assert_eq!(state.git_identity, Some(identity));
