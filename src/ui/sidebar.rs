@@ -106,303 +106,395 @@ pub fn show_cached(
 
     let mut action = None;
 
-    if !local.is_empty() {
-        paint_section(
-            ui,
-            rect,
-            y,
-            "Branches",
-            &mut sidebar_state.branches_expanded,
-            text,
-        );
-        y += ROW_HEIGHT;
-        if sidebar_state.branches_expanded {
-            for branch in &local {
-                let icon = if branch.is_current { CHECK } else { FOLDER };
-                let response = paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    icon,
-                    &branch.name,
-                    branch.is_current,
-                    text,
-                    muted,
-                    None,
-                    &format!("local_{}", branch.name),
-                );
+    let section_height = |expanded: bool, count: usize| {
+        ROW_HEIGHT
+            + if expanded {
+                count as f32 * ROW_HEIGHT
+            } else {
+                0.0
+            }
+    };
 
-                if response.double_clicked() {
-                    action = Some(SidebarAction::CheckoutBranch(branch.name.clone()));
-                }
+    let content_height = section_height(
+        sidebar_state.branches_expanded && !local.is_empty(),
+        local.len(),
+    ) + section_height(
+        sidebar_state.remotes_expanded && !remote.is_empty(),
+        remote.len(),
+    ) + if !app_state.cached_remotes.is_empty() {
+        4.0
+    } else {
+        0.0
+    } + section_height(
+        sidebar_state.tags_expanded && !app_state.cached_tags.is_empty(),
+        app_state.cached_tags.len(),
+    ) + if !app_state.cached_stashes.is_empty() {
+        4.0 + section_height(
+            sidebar_state.stashes_expanded,
+            app_state.cached_stashes.len(),
+        )
+    } else {
+        0.0
+    } + if !app_state.github_pull_requests.is_empty() {
+        4.0 + section_height(
+            sidebar_state.prs_expanded,
+            app_state.github_pull_requests.len(),
+        )
+    } else {
+        0.0
+    } + if !app_state.github_action_runs.is_empty() {
+        4.0 + section_height(
+            sidebar_state.runs_expanded,
+            app_state.github_action_runs.len(),
+        )
+    } else {
+        0.0
+    } + if !app_state.github_releases.is_empty() {
+        4.0 + section_height(
+            sidebar_state.releases_expanded,
+            app_state.github_releases.len(),
+        )
+    } else {
+        0.0
+    } + if !app_state.github_packages.is_empty() {
+        4.0 + section_height(
+            sidebar_state.packages_expanded,
+            app_state.github_packages.len(),
+        )
+    } else {
+        0.0
+    };
 
-                let branch_name = branch.name.clone();
-                let is_current = branch.is_current;
-                response.context_menu(|ui| {
-                    let btn = ui.add_enabled(!is_current, egui::Button::new("Delete Branch"));
-                    if btn.clicked() {
-                        action = Some(SidebarAction::DeleteBranch(branch_name.clone()));
-                        ui.close();
+    let scroll_rect = egui::Rect::from_min_max(egui::pos2(rect.left(), y), rect.right_bottom());
+
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .id_salt("app_sidebar_scroll_host")
+            .max_rect(scroll_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("app_sidebar_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let (content_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), content_height),
+                        egui::Sense::hover(),
+                    );
+                    let mut local_y = content_rect.top();
+
+                    if !local.is_empty() {
+                        paint_section(
+                            ui,
+                            content_rect,
+                            local_y,
+                            "Branches",
+                            &mut sidebar_state.branches_expanded,
+                            text,
+                        );
+                        local_y += ROW_HEIGHT;
+                        if sidebar_state.branches_expanded {
+                            for branch in &local {
+                                let icon = if branch.is_current { CHECK } else { FOLDER };
+                                let response = paint_tree_row(
+                                    ui,
+                                    content_rect,
+                                    local_y,
+                                    1,
+                                    icon,
+                                    &branch.name,
+                                    branch.is_current,
+                                    text,
+                                    muted,
+                                    None,
+                                    &format!("local_{}", branch.name),
+                                );
+
+                                if response.double_clicked() {
+                                    action =
+                                        Some(SidebarAction::CheckoutBranch(branch.name.clone()));
+                                }
+
+                                let branch_name = branch.name.clone();
+                                let is_current = branch.is_current;
+                                response.context_menu(|ui| {
+                                    let btn = ui.add_enabled(
+                                        !is_current,
+                                        egui::Button::new("Delete Branch"),
+                                    );
+                                    if btn.clicked() {
+                                        action =
+                                            Some(SidebarAction::DeleteBranch(branch_name.clone()));
+                                        ui.close();
+                                    }
+                                });
+
+                                local_y += ROW_HEIGHT;
+                            }
+                        }
+                    }
+
+                    if !remote.is_empty() {
+                        paint_section(
+                            ui,
+                            content_rect,
+                            local_y,
+                            "Remotes",
+                            &mut sidebar_state.remotes_expanded,
+                            text,
+                        );
+                        local_y += ROW_HEIGHT;
+                        if sidebar_state.remotes_expanded {
+                            for branch in &remote {
+                                paint_tree_row(
+                                    ui,
+                                    content_rect,
+                                    local_y,
+                                    1,
+                                    GITHUB_LOGO,
+                                    &branch.name,
+                                    false,
+                                    text,
+                                    muted,
+                                    None,
+                                    &format!("remote_{}", branch.name),
+                                );
+                                local_y += ROW_HEIGHT;
+                            }
+                        }
+                    }
+
+                    if !app_state.cached_remotes.is_empty() {
+                        local_y += 4.0;
+                    }
+
+                    if !app_state.cached_tags.is_empty() {
+                        paint_section(
+                            ui,
+                            content_rect,
+                            local_y,
+                            "Tags",
+                            &mut sidebar_state.tags_expanded,
+                            text,
+                        );
+                        local_y += ROW_HEIGHT;
+                        if sidebar_state.tags_expanded {
+                            for tag in &app_state.cached_tags {
+                                paint_tree_row(
+                                    ui,
+                                    content_rect,
+                                    local_y,
+                                    1,
+                                    FUNNEL,
+                                    &tag.name,
+                                    false,
+                                    text,
+                                    muted,
+                                    None,
+                                    &format!("tag_{}", tag.name),
+                                );
+                                local_y += ROW_HEIGHT;
+                            }
+                        }
+                    }
+
+                    if !app_state.cached_stashes.is_empty() {
+                        local_y += 4.0;
+                        paint_section(
+                            ui,
+                            content_rect,
+                            local_y,
+                            "Stashes",
+                            &mut sidebar_state.stashes_expanded,
+                            text,
+                        );
+                        local_y += ROW_HEIGHT;
+                        if sidebar_state.stashes_expanded {
+                            for (idx, stash) in app_state.cached_stashes.iter().enumerate() {
+                                let label = format!("stash@{{{}}}: {}", idx, stash.message);
+                                let response = paint_tree_row(
+                                    ui,
+                                    content_rect,
+                                    local_y,
+                                    1,
+                                    STACK,
+                                    &label,
+                                    false,
+                                    text,
+                                    muted,
+                                    Some((&stash.hash, muted)),
+                                    &format!("stash_{}", stash.hash),
+                                );
+
+                                response.context_menu(|ui| {
+                                    if ui.button("Apply Stash").clicked() {
+                                        action = Some(SidebarAction::StashApply(idx));
+                                        ui.close();
+                                    }
+                                    if ui.button("Pop Stash").clicked() {
+                                        action = Some(SidebarAction::StashPop(idx));
+                                        ui.close();
+                                    }
+                                    if ui.button("Drop Stash").clicked() {
+                                        action = Some(SidebarAction::StashDrop(idx));
+                                        ui.close();
+                                    }
+                                });
+
+                                local_y += ROW_HEIGHT;
+                            }
+                        }
+                    }
+
+                    // Pull Requests
+                    if !app_state.github_pull_requests.is_empty() {
+                        local_y += 4.0;
+                        paint_section(
+                            ui,
+                            content_rect,
+                            local_y,
+                            "Pull Requests",
+                            &mut sidebar_state.prs_expanded,
+                            text,
+                        );
+                        local_y += ROW_HEIGHT;
+                        if sidebar_state.prs_expanded {
+                            for pr in &app_state.github_pull_requests {
+                                let label = format!("#{} {}", pr.number, pr.title);
+                                let response = paint_tree_row(
+                                    ui,
+                                    content_rect,
+                                    local_y,
+                                    1,
+                                    GIT_PULL_REQUEST,
+                                    &label,
+                                    false,
+                                    text,
+                                    muted,
+                                    None,
+                                    &format!("pr_{}", pr.number),
+                                );
+                                if response.clicked() {
+                                    action = Some(SidebarAction::OpenUrl(pr.html_url.clone()));
+                                }
+                                local_y += ROW_HEIGHT;
+                            }
+                        }
+                    }
+
+                    // GitHub Actions Runs
+                    if !app_state.github_action_runs.is_empty() {
+                        local_y += 4.0;
+                        paint_section(
+                            ui,
+                            content_rect,
+                            local_y,
+                            "Actions",
+                            &mut sidebar_state.runs_expanded,
+                            text,
+                        );
+                        local_y += ROW_HEIGHT;
+                        if sidebar_state.runs_expanded {
+                            for run in &app_state.github_action_runs {
+                                let icon = match run.conclusion.as_deref() {
+                                    Some("success") => CHECK_CIRCLE,
+                                    Some("failure") => WARNING_CIRCLE,
+                                    _ => PLAY_CIRCLE,
+                                };
+                                let response = paint_tree_row(
+                                    ui,
+                                    content_rect,
+                                    local_y,
+                                    1,
+                                    icon,
+                                    &run.name,
+                                    false,
+                                    text,
+                                    muted,
+                                    Some((&run.head_branch, muted)),
+                                    &format!("run_{}", run.id),
+                                );
+                                if response.clicked() {
+                                    action = Some(SidebarAction::OpenUrl(run.html_url.clone()));
+                                }
+                                local_y += ROW_HEIGHT;
+                            }
+                        }
+                    }
+
+                    // Releases
+                    if !app_state.github_releases.is_empty() {
+                        local_y += 4.0;
+                        paint_section(
+                            ui,
+                            content_rect,
+                            local_y,
+                            "Releases",
+                            &mut sidebar_state.releases_expanded,
+                            text,
+                        );
+                        local_y += ROW_HEIGHT;
+                        if sidebar_state.releases_expanded {
+                            for release in &app_state.github_releases {
+                                let label = release.name.as_ref().unwrap_or(&release.tag_name);
+                                let response = paint_tree_row(
+                                    ui,
+                                    content_rect,
+                                    local_y,
+                                    1,
+                                    BOOKMARK,
+                                    label,
+                                    false,
+                                    text,
+                                    muted,
+                                    None,
+                                    &format!("release_{}", release.tag_name),
+                                );
+                                if response.clicked() {
+                                    action = Some(SidebarAction::OpenUrl(release.html_url.clone()));
+                                }
+                                local_y += ROW_HEIGHT;
+                            }
+                        }
+                    }
+
+                    // Packages
+                    if !app_state.github_packages.is_empty() {
+                        local_y += 4.0;
+                        paint_section(
+                            ui,
+                            content_rect,
+                            local_y,
+                            "Packages",
+                            &mut sidebar_state.packages_expanded,
+                            text,
+                        );
+                        local_y += ROW_HEIGHT;
+                        if sidebar_state.packages_expanded {
+                            for pkg in &app_state.github_packages {
+                                let response = paint_tree_row(
+                                    ui,
+                                    content_rect,
+                                    local_y,
+                                    1,
+                                    PACKAGE,
+                                    &pkg.name,
+                                    false,
+                                    text,
+                                    muted,
+                                    Some((&pkg.package_type, muted)),
+                                    &format!("package_{}", pkg.name),
+                                );
+                                if response.clicked() {
+                                    action = Some(SidebarAction::OpenUrl(pkg.html_url.clone()));
+                                }
+                                local_y += ROW_HEIGHT;
+                            }
+                        }
                     }
                 });
-
-                y += ROW_HEIGHT;
-            }
-        }
-    }
-
-    if !remote.is_empty() {
-        paint_section(
-            ui,
-            rect,
-            y,
-            "Remotes",
-            &mut sidebar_state.remotes_expanded,
-            text,
-        );
-        y += ROW_HEIGHT;
-        if sidebar_state.remotes_expanded {
-            for branch in &remote {
-                paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    GITHUB_LOGO,
-                    &branch.name,
-                    false,
-                    text,
-                    muted,
-                    None,
-                    &format!("remote_{}", branch.name),
-                );
-                y += ROW_HEIGHT;
-            }
-        }
-    }
-
-    if !app_state.cached_remotes.is_empty() {
-        y += 4.0;
-    }
-
-    if !app_state.cached_tags.is_empty() {
-        paint_section(ui, rect, y, "Tags", &mut sidebar_state.tags_expanded, text);
-        y += ROW_HEIGHT;
-        if sidebar_state.tags_expanded {
-            for tag in &app_state.cached_tags {
-                paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    FUNNEL,
-                    &tag.name,
-                    false,
-                    text,
-                    muted,
-                    None,
-                    &format!("tag_{}", tag.name),
-                );
-                y += ROW_HEIGHT;
-            }
-        }
-    }
-
-    if !app_state.cached_stashes.is_empty() {
-        y += 4.0;
-        paint_section(
-            ui,
-            rect,
-            y,
-            "Stashes",
-            &mut sidebar_state.stashes_expanded,
-            text,
-        );
-        y += ROW_HEIGHT;
-        if sidebar_state.stashes_expanded {
-            for (idx, stash) in app_state.cached_stashes.iter().enumerate() {
-                let label = format!("stash@{{{}}}: {}", idx, stash.message);
-                let response = paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    STACK,
-                    &label,
-                    false,
-                    text,
-                    muted,
-                    Some((&stash.hash, muted)),
-                    &format!("stash_{}", stash.hash),
-                );
-
-                response.context_menu(|ui| {
-                    if ui.button("Apply Stash").clicked() {
-                        action = Some(SidebarAction::StashApply(idx));
-                        ui.close();
-                    }
-                    if ui.button("Pop Stash").clicked() {
-                        action = Some(SidebarAction::StashPop(idx));
-                        ui.close();
-                    }
-                    if ui.button("Drop Stash").clicked() {
-                        action = Some(SidebarAction::StashDrop(idx));
-                        ui.close();
-                    }
-                });
-
-                y += ROW_HEIGHT;
-            }
-        }
-    }
-
-    // Pull Requests
-    if !app_state.github_pull_requests.is_empty() {
-        y += 4.0;
-        paint_section(
-            ui,
-            rect,
-            y,
-            "Pull Requests",
-            &mut sidebar_state.prs_expanded,
-            text,
-        );
-        y += ROW_HEIGHT;
-        if sidebar_state.prs_expanded {
-            for pr in &app_state.github_pull_requests {
-                let label = format!("#{} {}", pr.number, pr.title);
-                let response = paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    GIT_PULL_REQUEST,
-                    &label,
-                    false,
-                    text,
-                    muted,
-                    None,
-                    &format!("pr_{}", pr.number),
-                );
-                if response.clicked() {
-                    action = Some(SidebarAction::OpenUrl(pr.html_url.clone()));
-                }
-                y += ROW_HEIGHT;
-            }
-        }
-    }
-
-    // GitHub Actions Runs
-    if !app_state.github_action_runs.is_empty() {
-        y += 4.0;
-        paint_section(
-            ui,
-            rect,
-            y,
-            "Actions",
-            &mut sidebar_state.runs_expanded,
-            text,
-        );
-        y += ROW_HEIGHT;
-        if sidebar_state.runs_expanded {
-            for run in &app_state.github_action_runs {
-                let icon = match run.conclusion.as_deref() {
-                    Some("success") => CHECK_CIRCLE,
-                    Some("failure") => WARNING_CIRCLE,
-                    _ => PLAY_CIRCLE,
-                };
-                let response = paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    icon,
-                    &run.name,
-                    false,
-                    text,
-                    muted,
-                    Some((&run.head_branch, muted)),
-                    &format!("run_{}", run.id),
-                );
-                if response.clicked() {
-                    action = Some(SidebarAction::OpenUrl(run.html_url.clone()));
-                }
-                y += ROW_HEIGHT;
-            }
-        }
-    }
-
-    // Releases
-    if !app_state.github_releases.is_empty() {
-        y += 4.0;
-        paint_section(
-            ui,
-            rect,
-            y,
-            "Releases",
-            &mut sidebar_state.releases_expanded,
-            text,
-        );
-        y += ROW_HEIGHT;
-        if sidebar_state.releases_expanded {
-            for release in &app_state.github_releases {
-                let label = release.name.as_ref().unwrap_or(&release.tag_name);
-                let response = paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    BOOKMARK,
-                    label,
-                    false,
-                    text,
-                    muted,
-                    None,
-                    &format!("release_{}", release.tag_name),
-                );
-                if response.clicked() {
-                    action = Some(SidebarAction::OpenUrl(release.html_url.clone()));
-                }
-                y += ROW_HEIGHT;
-            }
-        }
-    }
-
-    // Packages
-    if !app_state.github_packages.is_empty() {
-        y += 4.0;
-        paint_section(
-            ui,
-            rect,
-            y,
-            "Packages",
-            &mut sidebar_state.packages_expanded,
-            text,
-        );
-        y += ROW_HEIGHT;
-        if sidebar_state.packages_expanded {
-            for pkg in &app_state.github_packages {
-                let response = paint_tree_row(
-                    ui,
-                    rect,
-                    y,
-                    1,
-                    PACKAGE,
-                    &pkg.name,
-                    false,
-                    text,
-                    muted,
-                    Some((&pkg.package_type, muted)),
-                    &format!("package_{}", pkg.name),
-                );
-                if response.clicked() {
-                    action = Some(SidebarAction::OpenUrl(pkg.html_url.clone()));
-                }
-                y += ROW_HEIGHT;
-            }
-        }
-    }
+        },
+    );
 
     action
 }
