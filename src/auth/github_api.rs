@@ -419,6 +419,222 @@ pub fn list_packages(token: &str, owner: &str, is_org: bool) -> Result<Vec<GitHu
     Ok(packages)
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GitHubResponse<T> {
+    Fresh { data: T, etag: Option<String> },
+    NotModified,
+    Error(String),
+}
+
+pub fn list_pull_requests_conditional(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    etag: Option<&str>,
+) -> Result<GitHubResponse<Vec<PullRequest>>, String> {
+    let http_client = build_authenticated_client(token)?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls?state=open");
+    let mut req = http_client.get(&url);
+    if let Some(e) = etag {
+        req = req.header(reqwest::header::IF_NONE_MATCH, e);
+    }
+    let response = req
+        .send()
+        .map_err(|error| format!("Failed to fetch pull requests: {error}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(GitHubResponse::NotModified);
+    }
+
+    if !response.status().is_success() {
+        return Ok(GitHubResponse::Error(format!(
+            "GitHub API returned status {} when fetching pull requests for {owner}/{repo}",
+            response.status()
+        )));
+    }
+
+    let etag_val = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let api_responses: Vec<PullRequestApiResponse> = response
+        .json()
+        .map_err(|error| format!("Failed to parse pull requests response: {error}"))?;
+
+    let pull_requests = api_responses
+        .into_iter()
+        .map(|api_pull_request| PullRequest {
+            number: api_pull_request.number,
+            title: api_pull_request.title,
+            state: api_pull_request.state,
+            user_login: api_pull_request.user.login,
+            created_at: api_pull_request.created_at,
+            updated_at: api_pull_request.updated_at,
+            html_url: api_pull_request.html_url,
+            head_ref: api_pull_request.head.ref_name,
+            base_ref: api_pull_request.base.ref_name,
+            draft: api_pull_request.draft,
+        })
+        .collect();
+
+    Ok(GitHubResponse::Fresh {
+        data: pull_requests,
+        etag: etag_val,
+    })
+}
+
+pub fn list_action_runs_conditional(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    etag: Option<&str>,
+) -> Result<GitHubResponse<Vec<ActionRun>>, String> {
+    let http_client = build_authenticated_client(token)?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/actions/runs?per_page=10");
+    let mut req = http_client.get(&url);
+    if let Some(e) = etag {
+        req = req.header(reqwest::header::IF_NONE_MATCH, e);
+    }
+    let response = req
+        .send()
+        .map_err(|error| format!("Failed to fetch action runs: {error}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(GitHubResponse::NotModified);
+    }
+
+    if !response.status().is_success() {
+        return Ok(GitHubResponse::Error(format!(
+            "GitHub API returned status {} when fetching action runs for {owner}/{repo}",
+            response.status()
+        )));
+    }
+
+    let etag_val = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let workflow_response: WorkflowRunsResponse = response
+        .json()
+        .map_err(|error| format!("Failed to parse action runs response: {error}"))?;
+
+    Ok(GitHubResponse::Fresh {
+        data: workflow_response.workflow_runs,
+        etag: etag_val,
+    })
+}
+
+pub fn list_releases_conditional(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    etag: Option<&str>,
+) -> Result<GitHubResponse<Vec<GitHubRelease>>, String> {
+    let http_client = build_authenticated_client(token)?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=20");
+    let mut req = http_client.get(&url);
+    if let Some(e) = etag {
+        req = req.header(reqwest::header::IF_NONE_MATCH, e);
+    }
+    let response = req
+        .send()
+        .map_err(|error| format!("Failed to fetch releases: {error}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(GitHubResponse::NotModified);
+    }
+
+    if !response.status().is_success() {
+        return Ok(GitHubResponse::Error(format!(
+            "GitHub API returned status {} when fetching releases for {owner}/{repo}",
+            response.status()
+        )));
+    }
+
+    let etag_val = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let list = response
+        .json::<Vec<GitHubRelease>>()
+        .map_err(|error| format!("Failed to parse releases response: {error}"))?;
+
+    Ok(GitHubResponse::Fresh {
+        data: list,
+        etag: etag_val,
+    })
+}
+
+#[allow(clippy::type_complexity)]
+pub fn list_packages_conditional(
+    token: &str,
+    owner: &str,
+    is_org: bool,
+    container_etag: Option<&str>,
+    npm_etag: Option<&str>,
+) -> Result<
+    (
+        GitHubResponse<Vec<GitHubPackage>>,
+        GitHubResponse<Vec<GitHubPackage>>,
+    ),
+    String,
+> {
+    let http_client = build_authenticated_client(token)?;
+    let prefix = if is_org { "orgs" } else { "users" };
+
+    let fetch_one = |pkg_type: &str,
+                     etag: Option<&str>|
+     -> Result<GitHubResponse<Vec<GitHubPackage>>, String> {
+        let url = format!(
+            "https://api.github.com/{prefix}/{owner}/packages?package_type={pkg_type}&per_page=20"
+        );
+        let mut req = http_client.get(&url);
+        if let Some(e) = etag {
+            req = req.header(reqwest::header::IF_NONE_MATCH, e);
+        }
+        let res = req
+            .send()
+            .map_err(|error| format!("Failed to fetch packages of type {pkg_type}: {error}"))?;
+
+        if res.status() == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(GitHubResponse::NotModified);
+        }
+
+        if !res.status().is_success() {
+            return Ok(GitHubResponse::Error(format!(
+                "GitHub API returned status {} when fetching packages of type {pkg_type} for {owner}",
+                res.status()
+            )));
+        }
+
+        let etag_val = res
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let list = res
+            .json::<Vec<GitHubPackage>>()
+            .map_err(|error| format!("Failed to parse packages response: {error}"))?;
+
+        Ok(GitHubResponse::Fresh {
+            data: list,
+            etag: etag_val,
+        })
+    };
+
+    let container_res = fetch_one("container", container_etag)?;
+    let npm_res = fetch_one("npm", npm_etag)?;
+
+    Ok((container_res, npm_res))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -79,8 +79,19 @@ struct PalimpsestApp {
     authed_github_login: Option<String>,
     current_repo_owned_by_authed_user: Option<bool>,
     manager_repo_filter: repo_manager_sidebar::RepoOwnershipFilter,
-    repo_metadata_fetches: std::collections::HashSet<String>,
+    repo_metadata_fetches: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     avatar_fetches: std::collections::HashSet<String>,
+    show_clone_dialog: bool,
+    clone_url: String,
+    clone_dir: String,
+    pending_open_repo: Arc<std::sync::Mutex<Option<String>>>,
+    show_setup_wizard_dialog: bool,
+    show_preferences_dialog: bool,
+    show_update_dialog: bool,
+    show_create_tag_dialog: bool,
+    new_tag_name: String,
+    show_save_stash_dialog: bool,
+    new_stash_message: String,
 }
 
 struct RepoLiveState {
@@ -91,6 +102,7 @@ struct RepoLiveState {
 
 struct RepoTrackerHandle {
     stop: Arc<AtomicBool>,
+    watch_tx: std::sync::mpsc::Sender<palimpsest::git::live::WatchEvent>,
 }
 
 impl PalimpsestApp {
@@ -179,8 +191,21 @@ impl PalimpsestApp {
                 "external" => repo_manager_sidebar::RepoOwnershipFilter::External,
                 _ => repo_manager_sidebar::RepoOwnershipFilter::All,
             },
-            repo_metadata_fetches: std::collections::HashSet::new(),
+            repo_metadata_fetches: Arc::new(
+                std::sync::Mutex::new(std::collections::HashSet::new()),
+            ),
             avatar_fetches: std::collections::HashSet::new(),
+            show_clone_dialog: false,
+            clone_url: String::new(),
+            clone_dir: String::new(),
+            pending_open_repo: Arc::new(std::sync::Mutex::new(None)),
+            show_setup_wizard_dialog: false,
+            show_preferences_dialog: false,
+            show_update_dialog: false,
+            show_create_tag_dialog: false,
+            new_tag_name: String::new(),
+            show_save_stash_dialog: false,
+            new_stash_message: String::new(),
         };
 
         app.restore_active_repo_from_state();
@@ -236,7 +261,7 @@ impl PalimpsestApp {
                 remote: None,
             });
 
-        palimpsest::git::live::spawn_repo_tracker(
+        let watch_tx = palimpsest::git::live::spawn_repo_tracker(
             path.to_string(),
             generation,
             self.repo_live_tx.clone(),
@@ -246,7 +271,7 @@ impl PalimpsestApp {
         );
 
         self.repo_live_trackers
-            .insert(path.to_string(), RepoTrackerHandle { stop });
+            .insert(path.to_string(), RepoTrackerHandle { stop, watch_tx });
     }
 
     fn ensure_ownership_probes(&mut self) {
@@ -333,8 +358,11 @@ impl PalimpsestApp {
                     }
                     entry.remote = Some(snapshot.clone());
                     if self.store.get_state().current_repo.as_deref() == Some(&path) {
-                        self.current_repo_owned_by_authed_user =
-                            Some(matches!(snapshot.ownership, RepoOwnership::Owned));
+                        self.current_repo_owned_by_authed_user = match snapshot.ownership {
+                            RepoOwnership::Owned => Some(true),
+                            RepoOwnership::External => Some(false),
+                            RepoOwnership::Unknown => None,
+                        };
                         if snapshot.ownership == RepoOwnership::External {
                             self.store.dispatch(AppAction::SetGitHubData {
                                 pull_requests: Vec::new(),
@@ -379,6 +407,32 @@ impl PalimpsestApp {
                         changed = true;
                     }
                 }
+                RepoLiveEvent::CommitDetails {
+                    path,
+                    hash,
+                    email,
+                    signature,
+                    files,
+                } => {
+                    if self.store.get_state().current_repo.as_deref() == Some(&path)
+                        && self.body_state.selected_commit_hash.as_ref() == Some(&hash)
+                    {
+                        if let Some(ref mut c) = self.body_state.selected_commit_cache {
+                            c.email = email;
+                            c.populated = true;
+                        }
+                        self.body_state.selected_commit_signature_cache = signature.map(|sig| {
+                            palimpsest::ui::commit_drawer::CommitDrawerSignature {
+                                status: sig.status,
+                                summary: sig.summary,
+                                key_id: sig.key_id,
+                                trust: sig.trust,
+                            }
+                        });
+                        self.body_state.selected_commit_files_cache = files;
+                        changed = true;
+                    }
+                }
             }
         }
 
@@ -406,9 +460,12 @@ impl PalimpsestApp {
         }
 
         if let Some(remote) = &entry.remote {
+            self.current_repo_owned_by_authed_user = match remote.ownership {
+                RepoOwnership::Owned => Some(true),
+                RepoOwnership::External => Some(false),
+                RepoOwnership::Unknown => None,
+            };
             if remote.ownership != RepoOwnership::External {
-                self.current_repo_owned_by_authed_user =
-                    Some(matches!(remote.ownership, RepoOwnership::Owned));
                 self.store.dispatch(AppAction::SetGitHubData {
                     pull_requests: remote.pull_requests.clone(),
                     action_runs: remote.action_runs.clone(),
@@ -417,7 +474,24 @@ impl PalimpsestApp {
                 });
                 self.store
                     .dispatch(AppAction::SetGitHubError(remote.github_error.clone()));
+            } else {
+                self.store.dispatch(AppAction::SetGitHubData {
+                    pull_requests: Vec::new(),
+                    action_runs: Vec::new(),
+                    releases: Vec::new(),
+                    packages: Vec::new(),
+                });
+                self.store.dispatch(AppAction::SetGitHubError(None));
             }
+        } else {
+            self.current_repo_owned_by_authed_user = None;
+            self.store.dispatch(AppAction::SetGitHubData {
+                pull_requests: Vec::new(),
+                action_runs: Vec::new(),
+                releases: Vec::new(),
+                packages: Vec::new(),
+            });
+            self.store.dispatch(AppAction::SetGitHubError(None));
         }
     }
 
@@ -468,7 +542,28 @@ impl PalimpsestApp {
                 let ctx = self.egui_ctx.clone();
                 self.ensure_repo_tracker(path, &ctx);
                 self.store.dispatch(AppAction::OpenRepo(path.to_string()));
-                self.refresh_git_data();
+
+                let has_memory_cache = if let Some(entry) = self.repo_live_states.get(path) {
+                    entry.local.is_some()
+                } else {
+                    false
+                };
+
+                if has_memory_cache {
+                    self.sync_active_repo_from_cache(path);
+                } else if let Some(disk_cache) =
+                    palimpsest::git::cache::load_cache(path, self.authed_github_login.as_deref())
+                {
+                    if let Some(entry) = self.repo_live_states.get_mut(path) {
+                        entry.local = Some(disk_cache.local_snapshot.to_snapshot());
+                        entry.remote = disk_cache.remote_snapshot;
+                    }
+                    self.sync_active_repo_from_cache(path);
+                } else {
+                    self.refresh_git_data();
+                }
+
+                self.evict_stale_caches();
                 self.persist_session();
             }
             Err(e) => {
@@ -497,6 +592,42 @@ impl PalimpsestApp {
                     self.store.dispatch(AppAction::SelectManagerRepo(None));
                 }
                 self.persist_session();
+            }
+        }
+    }
+
+    fn evict_stale_caches(&mut self) {
+        let state = self.store.get_state();
+        let mut keep = std::collections::HashSet::new();
+        if let Some(ref current) = state.current_repo {
+            keep.insert(current.clone());
+        }
+        for tab in &state.open_tabs {
+            keep.insert(tab.clone());
+        }
+        for repo in state.recent_repos.iter().take(20) {
+            keep.insert(repo.path.clone());
+        }
+
+        let to_remove: Vec<String> = self
+            .repo_live_states
+            .keys()
+            .filter(|k| !keep.contains(*k))
+            .cloned()
+            .collect();
+
+        for path in to_remove {
+            self.stop_repo_tracker(&path);
+            self.repo_live_states.remove(&path);
+        }
+    }
+
+    fn trigger_tracker_refresh(&self) {
+        if let Some(path) = self.store.get_state().current_repo.as_ref() {
+            if let Some(handle) = self.repo_live_trackers.get(path) {
+                let _ = handle
+                    .watch_tx
+                    .send(palimpsest::git::live::WatchEvent::ForceRefresh);
             }
         }
     }
@@ -844,6 +975,169 @@ impl PalimpsestApp {
         };
         use palimpsest::ui::repo_manager::{format_relative_time, parse_tag_version};
 
+        // 1. Try to load from disk cache first
+        if let Some(disk_cache) =
+            palimpsest::git::cache::load_cache(path, self.authed_github_login.as_deref())
+        {
+            let local = &disk_cache.local_snapshot;
+            let repo_name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path)
+                .to_string();
+            let branch = local.status.branch.clone();
+            let uncommitted = local.status.staged_count + local.status.unstaged_count;
+
+            let manager_remotes: Vec<ManagerRemote> = local
+                .remotes
+                .iter()
+                .map(|r| {
+                    let is_github = palimpsest::ui::repo_manager::is_github_url(&r.url);
+                    ManagerRemote {
+                        name: r.name.clone(),
+                        url: r.url.clone(),
+                        is_github,
+                    }
+                })
+                .collect();
+
+            let manager_branches: Vec<ManagerBranch> = local
+                .branches
+                .iter()
+                .take(5)
+                .map(|b| {
+                    let tip_commit = local
+                        .commits
+                        .iter()
+                        .find(|c| c.hash.starts_with(&b.tip_hash) || c.short_hash == b.tip_hash);
+                    ManagerBranch {
+                        name: b.name.clone(),
+                        last_message: tip_commit
+                            .map(|c| c.message.lines().next().unwrap_or("").to_string())
+                            .unwrap_or_default(),
+                        author: tip_commit.map(|c| c.author.clone()).unwrap_or_default(),
+                        relative_date: tip_commit
+                            .map(|c| {
+                                format_relative_time(
+                                    c.timestamp
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0),
+                                )
+                            })
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect();
+
+            let mut tags = local.tags.clone();
+            tags.sort_by(|a, b| {
+                let va = parse_tag_version(&a.name);
+                let vb = parse_tag_version(&b.name);
+                vb.cmp(&va)
+            });
+            let manager_tags: Vec<ManagerTag> = tags
+                .iter()
+                .take(5)
+                .map(|t| ManagerTag {
+                    name: t.name.clone(),
+                    author: t.author.clone(),
+                    relative_date: format_relative_time(
+                        t.timestamp
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                    ),
+                })
+                .collect();
+
+            let manager_commits: Vec<ManagerCommit> = local
+                .commits
+                .iter()
+                .take(5)
+                .map(|c| ManagerCommit {
+                    message: c.message.lines().next().unwrap_or("").to_string(),
+                    author: c.author.clone(),
+                    relative_date: format_relative_time(
+                        c.timestamp
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0),
+                    ),
+                })
+                .collect();
+
+            let last_date = local.commits.first().map_or("unknown".to_string(), |c| {
+                format_relative_time(
+                    c.timestamp
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                )
+            });
+
+            let initial_date = local.commits.last().map_or("unknown".to_string(), |c| {
+                format_relative_time(
+                    c.timestamp
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0),
+                )
+            });
+
+            let owned_by_authed_user = local.ownership;
+
+            let details = ManagerRepoDetails {
+                repo_path: path.to_string(),
+                repo_name,
+                branch,
+                uncommitted_files: uncommitted,
+                total_commits: local.commits.len(),
+                initial_commit_date: initial_date,
+                last_commit_date: last_date,
+                remotes: manager_remotes,
+                branches: manager_branches,
+                tags: manager_tags,
+                commits: manager_commits,
+                owned_by_authed_user,
+                is_org: None,
+                is_private: None,
+            };
+
+            self.store
+                .dispatch(AppAction::SetManagerDetails(Some(details.clone())));
+            self.trigger_github_metadata_fetch(details);
+
+            // Spawn background task for history stats to refresh details lazily
+            let store = self.store.clone();
+            let path_str = path.to_string();
+            let ctx = self.egui_ctx.clone();
+            std::thread::spawn(move || {
+                if let Ok(repo) = GitRepo::open(&path_str) {
+                    if let Ok((total_commits, oldest_commit)) = repo.history_stats() {
+                        let initial_date = oldest_commit.map_or("unknown".to_string(), |c| {
+                            format_relative_time(
+                                c.timestamp
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0),
+                            )
+                        });
+                        if let Some(mut details) = store.get_state().manager_details {
+                            if details.repo_path == path_str {
+                                details.total_commits = total_commits;
+                                details.initial_commit_date = initial_date;
+                                store.dispatch(AppAction::SetManagerDetails(Some(details)));
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
+                }
+            });
+            return;
+        }
+
+        // 2. Fallback: load dynamically if no cache exists
         match GitRepo::open(path) {
             Ok(repo) => {
                 let repo_name = repo.repo_name().unwrap_or_else(|| path.to_string());
@@ -855,16 +1149,6 @@ impl PalimpsestApp {
                     .map_or(0, |s| s.staged_count + s.unstaged_count);
 
                 let commits = repo.commits(Some(20)).unwrap_or_default();
-                let (total_commits, oldest_commit) = repo.history_stats().unwrap_or((0, None));
-
-                let initial_date = oldest_commit.map_or("unknown".to_string(), |c| {
-                    format_relative_time(
-                        c.timestamp
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0),
-                    )
-                });
                 let last_date = commits.first().map_or("unknown".to_string(), |c| {
                     format_relative_time(
                         c.timestamp
@@ -892,8 +1176,9 @@ impl PalimpsestApp {
                     })
                     .collect();
 
-                let branches = repo.branches().unwrap_or_default();
-                let manager_branches: Vec<ManagerBranch> = branches
+                let manager_branches: Vec<ManagerBranch> = repo
+                    .branches()
+                    .unwrap_or_default()
                     .iter()
                     .take(5)
                     .map(|b| {
@@ -920,7 +1205,7 @@ impl PalimpsestApp {
                     })
                     .collect();
 
-                let mut tags = repo.tags().unwrap_or_default();
+                let mut tags = repo.tags_limit(Some(5)).unwrap_or_default();
                 tags.sort_by(|a, b| {
                     let va = parse_tag_version(&a.name);
                     let vb = parse_tag_version(&b.name);
@@ -961,8 +1246,8 @@ impl PalimpsestApp {
                     repo_name,
                     branch,
                     uncommitted_files: uncommitted,
-                    total_commits,
-                    initial_commit_date: initial_date,
+                    total_commits: 0,
+                    initial_commit_date: "loading...".to_string(),
                     last_commit_date: last_date,
                     remotes: manager_remotes,
                     branches: manager_branches,
@@ -976,6 +1261,33 @@ impl PalimpsestApp {
                 self.store
                     .dispatch(AppAction::SetManagerDetails(Some(details.clone())));
                 self.trigger_github_metadata_fetch(details);
+
+                // Spawn background task for history stats
+                let store = self.store.clone();
+                let path_str = path.to_string();
+                let ctx = self.egui_ctx.clone();
+                std::thread::spawn(move || {
+                    if let Ok(repo) = GitRepo::open(&path_str) {
+                        if let Ok((total_commits, oldest_commit)) = repo.history_stats() {
+                            let initial_date = oldest_commit.map_or("unknown".to_string(), |c| {
+                                format_relative_time(
+                                    c.timestamp
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs() as i64)
+                                        .unwrap_or(0),
+                                )
+                            });
+                            if let Some(mut details) = store.get_state().manager_details {
+                                if details.repo_path == path_str {
+                                    details.total_commits = total_commits;
+                                    details.initial_commit_date = initial_date;
+                                    store.dispatch(AppAction::SetManagerDetails(Some(details)));
+                                    ctx.request_repaint();
+                                }
+                            }
+                        }
+                    }
+                });
             }
             Err(e) => {
                 tracing::warn!(path = %path, error = %e, "Repo not found, removing from recents");
@@ -987,12 +1299,20 @@ impl PalimpsestApp {
     }
 
     fn trigger_github_metadata_fetch(&mut self, details: palimpsest::state::ManagerRepoDetails) {
-        if self.repo_metadata_fetches.contains(&details.repo_path) {
-            return;
+        {
+            let mut fetches = self.repo_metadata_fetches.lock().unwrap();
+            if fetches.contains(&details.repo_path) {
+                return;
+            }
+            fetches.insert(details.repo_path.clone());
         }
 
         let creds = palimpsest::auth::credentials::load_credentials();
         let Some(token) = creds.github_token.clone() else {
+            self.repo_metadata_fetches
+                .lock()
+                .unwrap()
+                .remove(&details.repo_path);
             return;
         };
 
@@ -1007,13 +1327,17 @@ impl PalimpsestApp {
         }
 
         let Some((owner, repo)) = gh_remote else {
+            self.repo_metadata_fetches
+                .lock()
+                .unwrap()
+                .remove(&details.repo_path);
             return;
         };
 
-        self.repo_metadata_fetches.insert(details.repo_path.clone());
-
         let store = self.store.clone();
         let details_clone = details.clone();
+        let ctx = self.egui_ctx.clone();
+        let fetches_clone = self.repo_metadata_fetches.clone();
 
         tracing::debug!("Triggering background GitHub metadata fetch for {owner}/{repo}");
 
@@ -1028,14 +1352,28 @@ impl PalimpsestApp {
                     let mut updated = details_clone;
                     updated.is_org = Some(meta.is_org);
                     updated.is_private = Some(meta.is_private);
-                    store.dispatch(AppAction::SetManagerDetails(Some(updated)));
+
+                    fetches_clone.lock().unwrap().remove(&updated.repo_path);
+
+                    if store.get_state().manager_selected_repo.as_ref() == Some(&updated.repo_path)
+                    {
+                        store.dispatch(AppAction::SetManagerDetails(Some(updated)));
+                        ctx.request_repaint();
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to fetch repo metadata for {owner}/{repo}: {e}");
                     let mut updated = details_clone;
                     updated.is_org = None;
                     updated.is_private = None;
-                    store.dispatch(AppAction::SetManagerDetails(Some(updated)));
+
+                    fetches_clone.lock().unwrap().remove(&updated.repo_path);
+
+                    if store.get_state().manager_selected_repo.as_ref() == Some(&updated.repo_path)
+                    {
+                        store.dispatch(AppAction::SetManagerDetails(Some(updated)));
+                        ctx.request_repaint();
+                    }
                 }
             }
         });
@@ -1223,6 +1561,14 @@ fn avatars_dir() -> Option<std::path::PathBuf> {
 
 impl eframe::App for PalimpsestApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let pending = {
+            let mut guard = self.pending_open_repo.lock().unwrap();
+            guard.take()
+        };
+        if let Some(path) = pending {
+            self.open_repo(&path);
+        }
+
         self.process_repo_live_updates(ui.ctx());
 
         let state = self.store.get_state();
@@ -1244,8 +1590,9 @@ impl eframe::App for PalimpsestApp {
         let background = ui.visuals().widgets.inactive.bg_fill;
         ui.painter().rect_filled(ui.max_rect(), 0.0, background);
 
-        // Render Setup Wizard modal if setup is not completed
-        if !state.setup_completed {
+        // Render Setup Wizard modal if setup is not completed or if triggered manually from menu
+        let force_show_wizard = !state.setup_completed || self.show_setup_wizard_dialog;
+        if force_show_wizard {
             if let Some(ref user) = state.github_user {
                 self.setup_wizard_state.github_user =
                     Some(palimpsest::auth::github_oauth::GitHubUser {
@@ -1394,6 +1741,7 @@ impl eframe::App for PalimpsestApp {
                         tracing::warn!("Failed to save credentials: {}", e);
                     }
                     self.store.dispatch(AppAction::SetSetupCompleted(true));
+                    self.show_setup_wizard_dialog = false;
                     let cached_id = palimpsest::state::CachedGitIdentity {
                         name: Some(git_name),
                         email: Some(git_email),
@@ -1414,6 +1762,7 @@ impl eframe::App for PalimpsestApp {
                     creds.setup_completed = true;
                     let _ = palimpsest::auth::credentials::save_credentials(&creds);
                     self.store.dispatch(AppAction::SetSetupCompleted(true));
+                    self.show_setup_wizard_dialog = false;
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                             960.0, 720.0,
@@ -1427,7 +1776,6 @@ impl eframe::App for PalimpsestApp {
         // Auto fetch remote GitHub data if repository changes
         if state.current_repo != self.last_fetched_repo {
             self.last_fetched_repo = state.current_repo.clone();
-            self.refresh_github_remote_data(ui.ctx().clone());
         }
 
         let repo_name = self.repo_name();
@@ -1471,6 +1819,169 @@ impl eframe::App for PalimpsestApp {
                     tracing::info!(repo = %repo.path, "Selecting recent repository");
                     self.open_repo(&repo.path);
                 }
+            }
+            titlebar::OpenAction::InitRepo => {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    match git2::Repository::init(&path) {
+                        Ok(_) => {
+                            let path_str = path.to_string_lossy().to_string();
+                            self.open_repo(&path_str);
+                        }
+                        Err(e) => {
+                            self.store.dispatch(AppAction::SetRepoError(Some(format!(
+                                "Failed to initialize repository: {}",
+                                e
+                            ))));
+                        }
+                    }
+                }
+            }
+            titlebar::OpenAction::CloneRepo => {
+                self.show_clone_dialog = true;
+            }
+            titlebar::OpenAction::NewTab => {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    let path = path.to_string_lossy().to_string();
+                    self.open_repo(&path);
+                }
+            }
+            titlebar::OpenAction::QuickLaunch => {
+                self.show_command_palette = true;
+            }
+            titlebar::OpenAction::CloseTab => {
+                if let Some(index) = self.store.get_state().active_tab {
+                    self.close_tab(index);
+                }
+            }
+            titlebar::OpenAction::ConfigureSsh => {
+                self.setup_wizard_state.step = setup_wizard::WizardStep::SshGpgKeys;
+                self.show_setup_wizard_dialog = true;
+            }
+            titlebar::OpenAction::Accounts => {
+                self.setup_wizard_state.step = setup_wizard::WizardStep::GitHubAuth;
+                self.show_setup_wizard_dialog = true;
+            }
+            titlebar::OpenAction::CheckUpdates => {
+                self.show_update_dialog = true;
+            }
+            titlebar::OpenAction::Preferences => {
+                self.show_preferences_dialog = true;
+            }
+            titlebar::OpenAction::Exit => {
+                self.persist_session();
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            titlebar::OpenAction::NextTab => {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let next_index = (index + 1) % state.open_tabs.len();
+                        self.activate_tab(next_index);
+                    }
+                }
+            }
+            titlebar::OpenAction::PrevTab => {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let prev_index =
+                            (index + state.open_tabs.len() - 1) % state.open_tabs.len();
+                        self.activate_tab(prev_index);
+                    }
+                }
+            }
+            titlebar::OpenAction::Refresh => {
+                self.refresh_git_data();
+                self.trigger_tracker_refresh();
+            }
+            titlebar::OpenAction::Fetch => {
+                let ctx = ui.ctx().clone();
+                self.handle_quick_launch_action(QuickLaunchAction::Fetch, &ctx);
+            }
+            titlebar::OpenAction::Pull => {
+                let ctx = ui.ctx().clone();
+                self.handle_quick_launch_action(QuickLaunchAction::Pull, &ctx);
+            }
+            titlebar::OpenAction::Push => {
+                let ctx = ui.ctx().clone();
+                self.handle_quick_launch_action(QuickLaunchAction::Push, &ctx);
+            }
+            titlebar::OpenAction::SaveStash => {
+                self.show_save_stash_dialog = true;
+                self.new_stash_message.clear();
+            }
+            titlebar::OpenAction::NewBranch => {
+                let ctx = ui.ctx().clone();
+                self.handle_quick_launch_action(QuickLaunchAction::CreateBranch, &ctx);
+            }
+            titlebar::OpenAction::NewTag => {
+                self.show_create_tag_dialog = true;
+                self.new_tag_name.clear();
+            }
+            titlebar::OpenAction::NewWorktree => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "New Worktree functionality coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::GitFlow(cmd) => {
+                let msg = match cmd {
+                    titlebar::GitFlowCommand::Init => "Git Flow initialization coming soon",
+                    titlebar::GitFlowCommand::Feature => "Git Flow feature command coming soon",
+                    titlebar::GitFlowCommand::Release => "Git Flow release command coming soon",
+                    titlebar::GitFlowCommand::Hotfix => "Git Flow hotfix command coming soon",
+                };
+                self.store
+                    .dispatch(AppAction::SetRepoError(Some(msg.to_string())));
+            }
+            titlebar::OpenAction::GitLfs(cmd) => {
+                let msg = match cmd {
+                    titlebar::GitLfsCommand::Track => "Git LFS track command coming soon",
+                    titlebar::GitLfsCommand::Untrack => "Git LFS untrack command coming soon",
+                    titlebar::GitLfsCommand::ListFiles => "Git LFS file listing coming soon",
+                    titlebar::GitLfsCommand::Status => "Git LFS status coming soon",
+                };
+                self.store
+                    .dispatch(AppAction::SetRepoError(Some(msg.to_string())));
+            }
+            titlebar::OpenAction::ApplyPatch => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Apply Patch functionality coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::Bisect => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Bisect functionality coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::OpenInFileExplorer => {
+                if let Some(path) = self.store.get_state().current_repo.clone() {
+                    open_url(&path);
+                }
+            }
+            titlebar::OpenAction::OpenInConsole => {
+                if let Some(path) = self.store.get_state().current_repo.clone() {
+                    self.open_in_console(&path);
+                }
+            }
+            titlebar::OpenAction::RepositoryStatistics => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Repository Statistics coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::RepositoryTreemap => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Repository Treemap coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::PerformanceBenchmark => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Performance Benchmark coming soon".to_string(),
+                )));
+            }
+            titlebar::OpenAction::RepositorySettings => {
+                self.store.dispatch(AppAction::SetRepoError(Some(
+                    "Repository Settings coming soon".to_string(),
+                )));
             }
             titlebar::OpenAction::None => {}
         }
@@ -1522,7 +2033,7 @@ impl eframe::App for PalimpsestApp {
             }
             toolbar::ToolbarAction::Fetch => {
                 self.handle_quick_launch_action(QuickLaunchAction::Fetch, &ctx);
-                self.refresh_github_remote_data(ctx.clone());
+                self.trigger_tracker_refresh();
             }
             toolbar::ToolbarAction::Pull => {
                 self.handle_quick_launch_action(QuickLaunchAction::Pull, &ctx);
@@ -1576,12 +2087,80 @@ impl eframe::App for PalimpsestApp {
             let exit_shortcut = egui::KeyboardShortcut::new(command, egui::Key::Q);
             let logs_shortcut =
                 egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::L);
+            let init_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::N);
+            let clone_shortcut = egui::KeyboardShortcut::new(command, egui::Key::N);
+            let tab_shortcut = egui::KeyboardShortcut::new(command, egui::Key::T);
+            let quick_shortcut = egui::KeyboardShortcut::new(command, egui::Key::P);
+            let close_shortcut = egui::KeyboardShortcut::new(command, egui::Key::W);
+            let prefs_shortcut = egui::KeyboardShortcut::new(command, egui::Key::Comma);
+
+            let refresh_shortcut =
+                egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F5);
+            let fetch_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::F);
+            let pull_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::U);
+            let push_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::P);
+            let save_stash_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::H);
+            let new_branch_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::B);
+            let new_tag_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::SHIFT), egui::Key::T);
+            let open_explorer_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::ALT), egui::Key::O);
+            let open_console_shortcut =
+                egui::KeyboardShortcut::new(command.plus(egui::Modifiers::ALT), egui::Key::T);
+            let next_tab_shortcut =
+                egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Tab);
+            let prev_tab_shortcut = egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT),
+                egui::Key::Tab,
+            );
 
             if ctx.input_mut(|i| i.consume_shortcut(&open_shortcut)) {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
                     let path = path.to_string_lossy().to_string();
                     self.open_repo(&path);
                 }
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&init_shortcut)) {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    match git2::Repository::init(&path) {
+                        Ok(_) => {
+                            let path_str = path.to_string_lossy().to_string();
+                            self.open_repo(&path_str);
+                        }
+                        Err(e) => {
+                            self.store.dispatch(AppAction::SetRepoError(Some(format!(
+                                "Failed to initialize repository: {}",
+                                e
+                            ))));
+                        }
+                    }
+                }
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&clone_shortcut)) {
+                self.show_clone_dialog = true;
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&tab_shortcut)) {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    let path = path.to_string_lossy().to_string();
+                    self.open_repo(&path);
+                }
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&quick_shortcut)) {
+                self.show_command_palette = true;
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&close_shortcut)) {
+                if let Some(index) = self.store.get_state().active_tab {
+                    self.close_tab(index);
+                }
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&prefs_shortcut)) {
+                self.show_preferences_dialog = true;
             }
             if ctx.input_mut(|i| i.consume_shortcut(&exit_shortcut)) {
                 tracing::info!("Exiting app via shortcut");
@@ -1590,6 +2169,66 @@ impl eframe::App for PalimpsestApp {
             }
             if ctx.input_mut(|i| i.consume_shortcut(&logs_shortcut)) {
                 self.debug_open = true;
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&next_tab_shortcut)) {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let next_index = (index + 1) % state.open_tabs.len();
+                        self.activate_tab(next_index);
+                    }
+                }
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&prev_tab_shortcut)) {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let prev_index =
+                            (index + state.open_tabs.len() - 1) % state.open_tabs.len();
+                        self.activate_tab(prev_index);
+                    }
+                }
+            }
+
+            if self.git_repo.is_some() {
+                if ctx.input_mut(|i| i.consume_shortcut(&refresh_shortcut)) {
+                    self.refresh_git_data();
+                    self.trigger_tracker_refresh();
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&fetch_shortcut)) {
+                    let ctx_cloned = ctx.clone();
+                    self.handle_quick_launch_action(QuickLaunchAction::Fetch, &ctx_cloned);
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&pull_shortcut)) {
+                    let ctx_cloned = ctx.clone();
+                    self.handle_quick_launch_action(QuickLaunchAction::Pull, &ctx_cloned);
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&push_shortcut)) {
+                    let ctx_cloned = ctx.clone();
+                    self.handle_quick_launch_action(QuickLaunchAction::Push, &ctx_cloned);
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&save_stash_shortcut)) {
+                    self.show_save_stash_dialog = true;
+                    self.new_stash_message.clear();
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&new_branch_shortcut)) {
+                    let ctx_cloned = ctx.clone();
+                    self.handle_quick_launch_action(QuickLaunchAction::CreateBranch, &ctx_cloned);
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&new_tag_shortcut)) {
+                    self.show_create_tag_dialog = true;
+                    self.new_tag_name.clear();
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&open_explorer_shortcut)) {
+                    if let Some(path) = self.store.get_state().current_repo.clone() {
+                        open_url(&path);
+                    }
+                }
+                if ctx.input_mut(|i| i.consume_shortcut(&open_console_shortcut)) {
+                    if let Some(path) = self.store.get_state().current_repo.clone() {
+                        self.open_in_console(&path);
+                    }
+                }
             }
         }
 
@@ -1733,6 +2372,8 @@ impl eframe::App for PalimpsestApp {
                         &mut self.body_state,
                         &mut self.commit_panel_state,
                         &state,
+                        self.git_repo.as_ref(),
+                        &self.repo_live_tx,
                     )
                 },
             );
@@ -1802,6 +2443,413 @@ impl eframe::App for PalimpsestApp {
         if self.debug_open {
             show_debug_window(ui.ctx(), &self.log_buffer, &mut self.debug_open);
         }
+
+        if self.show_clone_dialog {
+            let mut close_dialog = false;
+            let mut start_clone = false;
+
+            let mut is_open = self.show_clone_dialog;
+            egui::Window::new("Clone Repository")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(480.0)
+                .open(&mut is_open)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        // Left Column: Logo
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(80.0, 140.0),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.add_space(12.0);
+                                let logo =
+                                    egui::Image::new(egui::include_image!("assets/logo.svg"))
+                                        .fit_to_exact_size(egui::vec2(48.0, 48.0));
+                                ui.add(logo);
+                            },
+                        );
+
+                        // Right Column: Form contents
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(360.0, 140.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.label(egui::RichText::new("Repository URL:").size(12.0));
+                                ui.add_sized(
+                                    [ui.available_width(), 26.0],
+                                    egui::TextEdit::singleline(&mut self.clone_url)
+                                        .hint_text("https://github.com/user/repo.git")
+                                        .margin(egui::Margin::symmetric(8, 6)),
+                                );
+                                ui.add_space(8.0);
+
+                                ui.label(egui::RichText::new("Destination Directory:").size(12.0));
+                                ui.horizontal(|ui| {
+                                    let input_width = ui.available_width() - 80.0;
+                                    ui.add_sized(
+                                        [input_width, 26.0],
+                                        egui::TextEdit::singleline(&mut self.clone_dir)
+                                            .hint_text("/path/to/local/directory")
+                                            .margin(egui::Margin::symmetric(8, 6)),
+                                    );
+                                    if ui
+                                        .add_sized([72.0, 26.0], egui::Button::new("Browse..."))
+                                        .clicked()
+                                    {
+                                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                            self.clone_dir = path.to_string_lossy().to_string();
+                                        }
+                                    }
+                                });
+
+                                ui.add_space(14.0);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let clone_btn = ui.add_enabled(
+                                            !self.clone_url.trim().is_empty()
+                                                && !self.clone_dir.trim().is_empty(),
+                                            egui::Button::new("Clone"),
+                                        );
+                                        if clone_btn.clicked() {
+                                            start_clone = true;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            close_dialog = true;
+                                        }
+                                    },
+                                );
+                            },
+                        );
+                    });
+
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close_dialog = true;
+                    }
+                });
+
+            if start_clone {
+                let url = self.clone_url.trim().to_string();
+                let path = self.clone_dir.trim().to_string();
+                let store = self.store.clone();
+                let pending_open = self.pending_open_repo.clone();
+                let ctx = ui.ctx().clone();
+
+                std::thread::spawn(move || {
+                    store.dispatch(AppAction::SetRepoError(Some(
+                        "Cloning repository...".to_string(),
+                    )));
+                    ctx.request_repaint();
+
+                    let mut final_path = std::path::PathBuf::from(&path);
+                    if final_path.is_dir() {
+                        let mut url_trimmed = url.trim_end_matches('/');
+                        if url_trimmed.ends_with(".git") {
+                            url_trimmed = &url_trimmed[..url_trimmed.len() - 4];
+                        }
+                        if let Some(pos) = url_trimmed.rfind('/') {
+                            let repo_name = &url_trimmed[pos + 1..];
+                            if !repo_name.is_empty() {
+                                final_path.push(repo_name);
+                            }
+                        } else if let Some(pos) = url_trimmed.rfind(':') {
+                            let repo_name = &url_trimmed[pos + 1..];
+                            if !repo_name.is_empty() {
+                                final_path.push(repo_name);
+                            }
+                        }
+                    }
+
+                    match git2::Repository::clone(&url, &final_path) {
+                        Ok(_) => {
+                            store.dispatch(AppAction::SetRepoError(None));
+                            let mut guard = pending_open.lock().unwrap();
+                            *guard = Some(final_path.to_string_lossy().to_string());
+                            ctx.request_repaint();
+                        }
+                        Err(e) => {
+                            store.dispatch(AppAction::SetRepoError(Some(format!(
+                                "Failed to clone repository: {}",
+                                e
+                            ))));
+                            ctx.request_repaint();
+                        }
+                    }
+                });
+                close_dialog = true;
+            }
+
+            if !is_open || close_dialog {
+                self.show_clone_dialog = false;
+                self.clone_url.clear();
+                self.clone_dir.clear();
+            }
+        }
+
+        if self.show_create_tag_dialog {
+            let mut close_dialog = false;
+            let mut create_tag = false;
+
+            let mut is_open = self.show_create_tag_dialog;
+            egui::Window::new("Create Tag")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(400.0)
+                .open(&mut is_open)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        // Left Column: Logo
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(80.0, 100.0),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.add_space(10.0);
+                                let logo =
+                                    egui::Image::new(egui::include_image!("assets/logo.svg"))
+                                        .fit_to_exact_size(egui::vec2(48.0, 48.0));
+                                ui.add(logo);
+                            },
+                        );
+
+                        // Right Column: Form contents
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(280.0, 100.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.label(egui::RichText::new("Tag Name:").size(12.0));
+                                let text_input = ui.add_sized(
+                                    [ui.available_width(), 26.0],
+                                    egui::TextEdit::singleline(&mut self.new_tag_name)
+                                        .hint_text("v1.0.0")
+                                        .margin(egui::Margin::symmetric(8, 6)),
+                                );
+                                text_input.request_focus();
+
+                                if text_input.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    create_tag = true;
+                                }
+
+                                ui.add_space(12.0);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let create_btn = ui.add_enabled(
+                                            !self.new_tag_name.trim().is_empty(),
+                                            egui::Button::new("Create"),
+                                        );
+                                        if create_btn.clicked() {
+                                            create_tag = true;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            close_dialog = true;
+                                        }
+                                    },
+                                );
+                            },
+                        );
+                    });
+
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close_dialog = true;
+                    }
+                });
+
+            if create_tag {
+                let name = self.new_tag_name.trim().to_string();
+                if !name.is_empty() {
+                    if let Some(repo) = &self.git_repo {
+                        match repo.tag_lightweight(&name) {
+                            Ok(_) => {
+                                self.refresh_git_data();
+                            }
+                            Err(e) => {
+                                self.store.dispatch(AppAction::SetRepoError(Some(format!(
+                                    "Failed to create tag: {}",
+                                    e
+                                ))));
+                            }
+                        }
+                    }
+                }
+                close_dialog = true;
+            }
+
+            if !is_open || close_dialog {
+                self.show_create_tag_dialog = false;
+                self.new_tag_name.clear();
+            }
+        }
+
+        if self.show_save_stash_dialog {
+            let mut close_dialog = false;
+            let mut save_stash = false;
+
+            let mut is_open = self.show_save_stash_dialog;
+            egui::Window::new("Save Stash")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(400.0)
+                .open(&mut is_open)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        // Left Column: Logo
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(80.0, 100.0),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.add_space(10.0);
+                                let logo =
+                                    egui::Image::new(egui::include_image!("assets/logo.svg"))
+                                        .fit_to_exact_size(egui::vec2(48.0, 48.0));
+                                ui.add(logo);
+                            },
+                        );
+
+                        // Right Column: Form contents
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(280.0, 100.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new("Stash Message (Optional):").size(12.0),
+                                );
+                                let text_input = ui.add_sized(
+                                    [ui.available_width(), 26.0],
+                                    egui::TextEdit::singleline(&mut self.new_stash_message)
+                                        .hint_text("WIP on stash")
+                                        .margin(egui::Margin::symmetric(8, 6)),
+                                );
+                                text_input.request_focus();
+
+                                if text_input.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                {
+                                    save_stash = true;
+                                }
+
+                                ui.add_space(12.0);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("Save").clicked() {
+                                            save_stash = true;
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            close_dialog = true;
+                                        }
+                                    },
+                                );
+                            },
+                        );
+                    });
+
+                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        close_dialog = true;
+                    }
+                });
+
+            if save_stash {
+                let message = self.new_stash_message.trim().to_string();
+                let msg_opt = if message.is_empty() {
+                    None
+                } else {
+                    Some(message)
+                };
+                let ctx = ui.ctx().clone();
+                self.handle_stash_action(StashAction::Save(msg_opt), &ctx);
+                close_dialog = true;
+            }
+
+            if !is_open || close_dialog {
+                self.show_save_stash_dialog = false;
+                self.new_stash_message.clear();
+            }
+        }
+
+        if self.show_preferences_dialog {
+            let mut close_dialog = false;
+
+            egui::Window::new("Preferences")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(320.0)
+                .show(ui.ctx(), |ui| {
+                    ui.vertical(|ui| {
+                        let state = self.store.get_state();
+
+                        let mut show_buttons = state.show_window_buttons;
+                        if ui
+                            .checkbox(&mut show_buttons, "Show window buttons")
+                            .changed()
+                        {
+                            self.store
+                                .dispatch(AppAction::ToggleWindowButtons(show_buttons));
+                            self.persist_session();
+                        }
+
+                        ui.add_space(8.0);
+
+                        if let Some(ref identity) = state.git_identity {
+                            ui.group(|ui| {
+                                ui.label(egui::RichText::new("Git Identity").strong());
+                                if let Some(ref name) = identity.name {
+                                    ui.label(format!("Name: {}", name));
+                                }
+                                if let Some(ref email) = identity.email {
+                                    ui.label(format!("Email: {}", email));
+                                }
+                            });
+                        }
+
+                        ui.add_space(12.0);
+                        if ui.button("Close").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                        {
+                            close_dialog = true;
+                        }
+                    });
+                });
+
+            if close_dialog {
+                self.show_preferences_dialog = false;
+            }
+        }
+
+        if self.show_update_dialog {
+            let mut close_dialog = false;
+
+            egui::Window::new("Check for Updates")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(280.0)
+                .show(ui.ctx(), |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(format!("Palimpsest v{}", env!("CARGO_PKG_VERSION")));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Palimpsest is up to date!");
+                        });
+                        ui.add_space(12.0);
+                        if ui.button("OK").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                        {
+                            close_dialog = true;
+                        }
+                    });
+                });
+
+            if close_dialog {
+                self.show_update_dialog = false;
+            }
+        }
     }
 }
 
@@ -1815,151 +2863,34 @@ impl Drop for PalimpsestApp {
 }
 
 impl PalimpsestApp {
-    fn refresh_github_remote_data(&self, ctx: egui::Context) {
-        let state = self.store.get_state();
-        if state.github_loading {
-            return;
-        }
+    fn open_in_console(&self, path: &str) {
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open")
+            .args(["-a", "Terminal", path])
+            .spawn();
 
-        let creds = palimpsest::auth::credentials::load_credentials();
-        let Some(token) = creds.github_token.clone() else {
-            return;
-        };
+        #[cfg(target_os = "windows")]
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", "cmd"])
+            .current_dir(path)
+            .spawn();
 
-        let mut gh_remote = None;
-        for remote in &state.cached_remotes {
-            if let Some((owner, repo)) = parse_github_remote(&remote.url) {
-                gh_remote = Some((owner, repo));
-                break;
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            if std::process::Command::new("x-terminal-emulator")
+                .current_dir(path)
+                .spawn()
+                .is_err()
+                && std::process::Command::new("gnome-terminal")
+                    .arg(format!("--working-directory={}", path))
+                    .spawn()
+                    .is_err()
+            {
+                let _ = std::process::Command::new("xterm")
+                    .current_dir(path)
+                    .spawn();
             }
         }
-
-        let Some((owner, repo)) = gh_remote else {
-            // Clear GitHub remote data from state if there is no GitHub remote
-            self.store.dispatch(AppAction::SetGitHubData {
-                pull_requests: Vec::new(),
-                action_runs: Vec::new(),
-                releases: Vec::new(),
-                packages: Vec::new(),
-            });
-            return;
-        };
-
-        self.store.dispatch(AppAction::SetGitHubLoading(true));
-
-        let store = self.store.clone();
-        std::thread::spawn(move || {
-            tracing::info!(owner = %owner, repo = %repo, "Fetching GitHub remote data in background");
-
-            let pulls = palimpsest::auth::github_api::list_pull_requests(&token, &owner, &repo);
-            let actions = palimpsest::auth::github_api::list_action_runs(&token, &owner, &repo);
-            let releases = palimpsest::auth::github_api::list_releases(&token, &owner, &repo);
-
-            let is_org =
-                match palimpsest::auth::github_api::get_repo_owner_type(&token, &owner, &repo) {
-                    Ok(owner_type) => owner_type.to_lowercase() == "organization",
-                    Err(_) => false,
-                };
-
-            let packages = palimpsest::auth::github_api::list_packages(&token, &owner, is_org);
-
-            let mut errors = Vec::new();
-
-            let pr_list = match pulls {
-                Ok(p) => p,
-                Err(e) => {
-                    errors.push(format!("PRs: {}", e));
-                    Vec::new()
-                }
-            };
-
-            let action_list = match actions {
-                Ok(a) => a,
-                Err(e) => {
-                    errors.push(format!("Actions: {}", e));
-                    Vec::new()
-                }
-            };
-
-            let release_list = match releases {
-                Ok(r) => r,
-                Err(e) => {
-                    errors.push(format!("Releases: {}", e));
-                    Vec::new()
-                }
-            };
-
-            let package_list = match packages {
-                Ok(pkg) => pkg,
-                Err(e) => {
-                    errors.push(format!("Packages: {}", e));
-                    Vec::new()
-                }
-            };
-
-            let mapped_prs = pr_list
-                .into_iter()
-                .map(|pr| palimpsest::state::GitHubPullRequest {
-                    number: pr.number,
-                    title: pr.title,
-                    state: pr.state,
-                    user_login: pr.user_login,
-                    html_url: pr.html_url,
-                    head_ref: pr.head_ref,
-                    base_ref: pr.base_ref,
-                    draft: pr.draft,
-                })
-                .collect::<Vec<_>>();
-
-            let mapped_actions = action_list
-                .into_iter()
-                .map(|run| palimpsest::state::GitHubActionRun {
-                    id: run.id,
-                    name: run.name,
-                    status: run.status,
-                    conclusion: run.conclusion,
-                    html_url: run.html_url,
-                    head_branch: run.head_branch,
-                })
-                .collect::<Vec<_>>();
-
-            let mapped_releases = release_list
-                .into_iter()
-                .map(|rel| palimpsest::state::GitHubRelease {
-                    tag_name: rel.tag_name,
-                    name: rel.name,
-                    html_url: rel.html_url,
-                    draft: rel.draft,
-                    prerelease: rel.prerelease,
-                    body: rel.body,
-                })
-                .collect::<Vec<_>>();
-
-            let mapped_packages = package_list
-                .into_iter()
-                .map(|pkg| palimpsest::state::GitHubPackage {
-                    name: pkg.name,
-                    package_type: pkg.package_type,
-                    html_url: pkg.html_url,
-                })
-                .collect::<Vec<_>>();
-
-            store.dispatch(AppAction::SetGitHubData {
-                pull_requests: mapped_prs,
-                action_runs: mapped_actions,
-                releases: mapped_releases,
-                packages: mapped_packages,
-            });
-
-            if !errors.is_empty() {
-                store.dispatch(AppAction::SetGitHubError(Some(errors.join(", "))));
-            } else {
-                store.dispatch(AppAction::SetGitHubError(None));
-            }
-
-            store.dispatch(AppAction::SetGitHubLoading(false));
-            ctx.request_repaint();
-        });
     }
 }
 

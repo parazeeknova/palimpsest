@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FileChangeKind {
     Added,
     Modified,
@@ -11,7 +12,7 @@ pub enum FileChangeKind {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileStatus {
     pub path: String,
     pub old_path: Option<String>,
@@ -22,7 +23,7 @@ pub struct FileStatus {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Commit {
     pub hash: String,
     pub short_hash: String,
@@ -34,7 +35,16 @@ pub struct Commit {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommitSignatureInfo {
+    pub status: String,
+    pub summary: Option<String>,
+    pub key_id: Option<String>,
+    pub trust: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Branch {
     pub name: String,
     pub is_current: bool,
@@ -44,14 +54,14 @@ pub struct Branch {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Remote {
     pub name: String,
     pub url: String,
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Tag {
     pub name: String,
     pub target_hash: String,
@@ -60,7 +70,7 @@ pub struct Tag {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Stash {
     pub message: String,
     pub hash: String,
@@ -68,7 +78,7 @@ pub struct Stash {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepoStatus {
     pub branch: String,
     pub staged_count: usize,
