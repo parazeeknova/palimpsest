@@ -792,7 +792,7 @@ pub fn show_cached(
             rect.right_bottom(),
         );
 
-        drawer_height = if state.selected_commit_hash.is_some() {
+        drawer_height = if state.selected_commit_hash.is_some() && !state.drawer_state.detached {
             state.drawer_state.height.clamp(0.0, rows_rect.height())
         } else {
             0.0
@@ -835,20 +835,102 @@ pub fn show_cached(
 
         state.refresh_selected_commit_cache(app_state, git_repo, repo_live_tx, ui.ctx());
 
+        let mut close_clicked = false;
+        let mut detach_clicked = false;
+
         if let Some(selected) = state.selected_commit_cache.as_ref() {
-            let drawer_rect = egui::Rect::from_min_max(
-                egui::pos2(rows_rect.left(), rows_rect.bottom() - drawer_height),
-                rows_rect.right_bottom(),
-            );
-            commit_drawer::show(
-                ui,
-                drawer_rect,
-                &mut state.drawer_state,
-                app_state,
-                Some(selected),
-                state.selected_commit_signature_cache.as_ref(),
-                &state.selected_commit_files_cache,
-            );
+            if !state.drawer_state.detached {
+                let drawer_rect = egui::Rect::from_min_max(
+                    egui::pos2(rows_rect.left(), rows_rect.bottom() - drawer_height),
+                    rows_rect.right_bottom(),
+                );
+                match commit_drawer::show(
+                    ui,
+                    drawer_rect,
+                    &mut state.drawer_state,
+                    app_state,
+                    Some(selected),
+                    state.selected_commit_signature_cache.as_ref(),
+                    &state.selected_commit_files_cache,
+                ) {
+                    commit_drawer::CommitDrawerResponse::Close => {
+                        close_clicked = true;
+                    }
+                    commit_drawer::CommitDrawerResponse::Detach => {
+                        detach_clicked = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if detach_clicked {
+            state.drawer_state.detached = true;
+            ui.ctx().request_repaint();
+        }
+
+        if state.drawer_state.detached {
+            if let Some(selected) = state.selected_commit_cache.as_ref() {
+                let mut close_detached = false;
+                let mut attach_detached = false;
+
+                ui.ctx().show_viewport_immediate(
+                    egui::ViewportId::from_hash_of("commit_drawer_viewport"),
+                    egui::ViewportBuilder::default()
+                        .with_title("Commit Details")
+                        .with_inner_size(egui::vec2(600.0, 400.0)),
+                    |ui, _class| {
+                        if ui.ctx().input(|i| i.viewport().close_requested()) {
+                            close_detached = true;
+                        }
+
+                        egui::CentralPanel::default().show_inside(
+                            ui,
+                            |ui| match commit_drawer::show(
+                                ui,
+                                ui.max_rect(),
+                                &mut state.drawer_state,
+                                app_state,
+                                Some(selected),
+                                state.selected_commit_signature_cache.as_ref(),
+                                &state.selected_commit_files_cache,
+                            ) {
+                                commit_drawer::CommitDrawerResponse::Close => {
+                                    close_detached = true;
+                                }
+                                commit_drawer::CommitDrawerResponse::Attach => {
+                                    attach_detached = true;
+                                }
+                                _ => {}
+                            },
+                        );
+                    },
+                );
+
+                if attach_detached {
+                    state.drawer_state.detached = false;
+                    ui.ctx().request_repaint();
+                }
+
+                if close_detached {
+                    state.drawer_state.detached = false;
+                    close_clicked = true;
+                }
+            } else {
+                state.drawer_state.detached = false;
+            }
+        }
+
+        if close_clicked {
+            state.selected_commit_hash = None;
+            state.selected_commit_cache_hash = None;
+            state.selected_commit_cache = None;
+            state.selected_commit_signature_cache = None;
+            state.selected_commit_files_cache.clear();
+            state.selected_commit_cache_populated_with_repo = false;
+            state.selected_commit_cache_repo = None;
+            state.selected_row = None;
+            ui.ctx().request_repaint();
         }
     }
 
@@ -858,7 +940,8 @@ pub fn show_cached(
         .is_some_and(|s| s.staged_count > 0 || s.unstaged_count > 0);
 
     if show_panel {
-        let bottom_offset = if state.selected_commit_hash.is_some() {
+        let bottom_offset = if state.selected_commit_hash.is_some() && !state.drawer_state.detached
+        {
             drawer_height
         } else {
             0.0

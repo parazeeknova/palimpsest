@@ -1,6 +1,7 @@
 use eframe::egui;
 use egui_phosphor::regular::{
-    CARET_DOWN, CARET_RIGHT, FILE, FILE_PLUS, FILE_TEXT, FOLDER, FOLDER_OPEN,
+    ARROW_SQUARE_IN, ARROW_SQUARE_OUT, CARET_DOWN, CARET_RIGHT, FILE, FILE_PLUS, FILE_TEXT, FOLDER,
+    FOLDER_OPEN, X,
 };
 use std::collections::BTreeMap;
 
@@ -46,6 +47,7 @@ pub struct State {
     pub tab: CommitDrawerTab,
     tree_state: TreeState,
     pub height: f32,
+    pub detached: bool,
 }
 
 #[derive(Default)]
@@ -79,8 +81,17 @@ impl Default for State {
             tab: CommitDrawerTab::Commit,
             tree_state: TreeState::default(),
             height: 240.0,
+            detached: false,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommitDrawerResponse {
+    None,
+    Close,
+    Detach,
+    Attach,
 }
 
 pub fn show(
@@ -91,10 +102,9 @@ pub fn show(
     commit: Option<&CommitDrawerCommit>,
     signature: Option<&CommitDrawerSignature>,
     files: &[FileStatus],
-) {
+) -> CommitDrawerResponse {
     let fill = egui::Color32::from_rgb(36, 36, 36);
     let header_fill = egui::Color32::from_rgb(44, 44, 44);
-    let stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(78, 78, 78));
     let muted = egui::Color32::from_rgb(172, 172, 172);
 
     let panel_rect = egui::Rect::from_min_max(
@@ -103,8 +113,6 @@ pub fn show(
     );
 
     ui.painter().rect_filled(panel_rect, 0.0, fill);
-    ui.painter()
-        .line_segment([panel_rect.left_top(), panel_rect.right_top()], stroke);
 
     let header_height = 34.0;
     let header_rect = egui::Rect::from_min_size(
@@ -130,13 +138,8 @@ pub fn show(
     if resize_response.hovered() || resize_response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
-    ui.painter().line_segment(
-        [
-            egui::pos2(panel_rect.left() + 8.0, panel_rect.top() + 4.0),
-            egui::pos2(panel_rect.right() - 8.0, panel_rect.top() + 4.0),
-        ],
-        egui::Stroke::new(1.0_f32, muted.linear_multiply(0.4)),
-    );
+
+    let mut action = CommitDrawerResponse::None;
 
     ui.scope_builder(
         egui::UiBuilder::new()
@@ -150,6 +153,38 @@ pub fn show(
             tab_button(ui, state, CommitDrawerTab::Changes, "Changes");
             tab_button(ui, state, CommitDrawerTab::FileTree, "File Tree");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new(egui::RichText::new(X).size(12.0)).frame(false))
+                    .on_hover_text("Close drawer")
+                    .clicked()
+                {
+                    action = CommitDrawerResponse::Close;
+                }
+                ui.add_space(6.0);
+                if state.detached {
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new(ARROW_SQUARE_IN).size(12.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Attach drawer to main window")
+                        .clicked()
+                    {
+                        action = CommitDrawerResponse::Attach;
+                    }
+                } else {
+                    if ui
+                        .add(
+                            egui::Button::new(egui::RichText::new(ARROW_SQUARE_OUT).size(12.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Detach drawer to new window")
+                        .clicked()
+                    {
+                        action = CommitDrawerResponse::Detach;
+                    }
+                }
+                ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(format!("{} commits", app_state.cached_commits.len()))
                         .size(10.0)
@@ -193,11 +228,16 @@ pub fn show(
             }
         },
     );
+
+    action
 }
 
 fn tab_button(ui: &mut egui::Ui, state: &mut State, tab: CommitDrawerTab, label: &str) {
     let selected = state.tab == tab;
+    let old_bg_fill = ui.visuals().selection.bg_fill;
+    ui.visuals_mut().selection.bg_fill = egui::Color32::from_rgb(62, 62, 62);
     let response = ui.selectable_label(selected, label);
+    ui.visuals_mut().selection.bg_fill = old_bg_fill;
     if response.clicked() {
         state.tab = tab;
     }
