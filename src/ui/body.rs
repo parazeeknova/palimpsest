@@ -1,11 +1,11 @@
 use eframe::egui;
-use egui_phosphor::regular::{BOOKMARK, CHECK, GIT_BRANCH, PENCIL_SIMPLE, TAG};
+use egui_phosphor::regular::{BOOKMARK, CHECK, GIT_BRANCH, LAPTOP, PENCIL_SIMPLE, TAG, USER};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use crate::git::GitRepo;
 use crate::git::live::RepoLiveEvent;
-use crate::state::{AppState, CachedBranch, CachedCommit, CachedTag};
+use crate::state::{AppState, CachedBranch, CachedCommit, CachedRemote, CachedTag};
 use crate::ui::commit_drawer;
 use crate::ui::commit_panel;
 
@@ -205,7 +205,7 @@ struct CommitEntry {
     color_idx: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum RefKind {
     Branch,
     Tag,
@@ -219,6 +219,9 @@ struct RefBadge {
     kind: RefKind,
     highlighted: bool,
     connect_to_graph: bool,
+    has_local: bool,
+    has_remote: bool,
+    remote_avatar: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -473,7 +476,8 @@ impl Default for State {
 
 impl State {
     fn refresh_refs(&mut self, app_state: &AppState) {
-        self.branch_refs = build_branch_refs(&self.graph_data, &app_state.cached_branches);
+        self.branch_refs =
+            build_branch_refs(&self.graph_data, &app_state.cached_branches, app_state);
         self.tag_refs = build_tag_refs(&self.graph_data, &app_state.cached_tags);
         let release_badges = build_release_refs(app_state, &self.graph_data);
         self.tag_refs.extend(release_badges);
@@ -578,31 +582,80 @@ impl State {
     }
 }
 
-fn build_branch_refs(graph_data: &GraphData, branches: &[CachedBranch]) -> Vec<RefBadge> {
+fn get_base_branch_name(name: &str, remotes: &[CachedRemote]) -> String {
+    for remote in remotes {
+        let prefix = format!("{}/", remote.name);
+        if name.starts_with(&prefix) {
+            return name[prefix.len()..].to_string();
+        }
+    }
+    if let Some(pos) = name.find('/') {
+        return name[pos + 1..].to_string();
+    }
+    name.to_string()
+}
+
+fn build_branch_refs(
+    graph_data: &GraphData,
+    branches: &[CachedBranch],
+    app_state: &AppState,
+) -> Vec<RefBadge> {
+    let mut groups: HashMap<(String, String), Vec<&CachedBranch>> = HashMap::new();
+
+    for branch in branches {
+        let base_name = get_base_branch_name(&branch.name, &app_state.cached_remotes);
+        if base_name == "HEAD" {
+            continue;
+        }
+        groups
+            .entry((branch.tip_hash.clone(), base_name))
+            .or_default()
+            .push(branch);
+    }
+
     let mut refs = Vec::new();
 
-    for branch in branches.iter().filter(|branch| branch.is_current) {
+    let user_avatar = app_state.github_user.as_ref().and_then(|u| {
+        app_state.avatar_cache.get(&u.login).cloned().or_else(|| {
+            u.name
+                .as_ref()
+                .and_then(|n| app_state.avatar_cache.get(n).cloned())
+        })
+    });
+
+    for ((tip_hash, base_name), group_branches) in groups {
+        let row = commit_row_for_hash(graph_data, &tip_hash);
+        if row.is_none() {
+            continue;
+        }
+
+        let has_local = group_branches.iter().any(|b| !b.is_remote);
+        let has_remote = group_branches.iter().any(|b| b.is_remote);
+        let highlighted = group_branches.iter().any(|b| b.is_current);
+
         refs.push(RefBadge {
-            label: branch.name.clone(),
+            row,
+            label: base_name,
             kind: RefKind::Branch,
-            highlighted: true,
-            row: commit_row_for_hash(graph_data, branch.tip_hash.as_str()),
+            highlighted,
             connect_to_graph: true,
+            has_local,
+            has_remote,
+            remote_avatar: if has_remote {
+                user_avatar.clone()
+            } else {
+                None
+            },
         });
     }
 
-    for branch in branches
-        .iter()
-        .filter(|branch| !branch.is_current && !branch.is_remote)
-    {
-        refs.push(RefBadge {
-            label: branch.name.clone(),
-            kind: RefKind::Branch,
-            highlighted: false,
-            row: commit_row_for_hash(graph_data, branch.tip_hash.as_str()),
-            connect_to_graph: true,
-        });
-    }
+    refs.sort_by(|a, b| {
+        if a.highlighted != b.highlighted {
+            b.highlighted.cmp(&a.highlighted)
+        } else {
+            a.label.cmp(&b.label)
+        }
+    });
 
     refs
 }
@@ -615,6 +668,9 @@ fn build_tag_refs(graph_data: &GraphData, tags: &[CachedTag]) -> Vec<RefBadge> {
             highlighted: false,
             row: commit_row_for_hash(graph_data, tag.target_hash.as_str()),
             connect_to_graph: true,
+            has_local: false,
+            has_remote: false,
+            remote_avatar: None,
         })
         .collect()
 }
@@ -644,6 +700,9 @@ fn build_release_refs(app_state: &AppState, graph_data: &GraphData) -> Vec<RefBa
                     commit_row_for_hash(graph_data, target_hash)
                 },
                 connect_to_graph: true,
+                has_local: false,
+                has_remote: false,
+                remote_avatar: None,
             }
         })
         .filter(|badge| badge.row.is_some())
@@ -1339,7 +1398,16 @@ fn paint_top_status_row(
         let bottom_center_y = row.top() + 32.0;
 
         if top_status_row.show_ref_chip {
-            let chip_width = top_status_row.label.len() as f32 * 5.4 + 20.0;
+            let text_width = ui
+                .painter()
+                .layout_no_wrap(
+                    top_status_row.label.clone(),
+                    egui::FontId::proportional(9.0),
+                    egui::Color32::WHITE,
+                )
+                .rect
+                .width();
+            let chip_width = (text_width + 20.0).clamp(48.0, details_right - details_left);
             let chip_rect = egui::Rect::from_min_size(
                 egui::pos2(details_left, top_center_y - 8.0),
                 egui::vec2(chip_width, 16.0),
@@ -1390,9 +1458,19 @@ fn paint_top_status_row(
             let refs_rect = row.intersect(columns.refs).shrink2(egui::vec2(6.0, 4.0));
             let accent = egui::Color32::from_rgb(252, 197, 34);
             let chip_height = 16.0;
+            let text_width = ui
+                .painter()
+                .layout_no_wrap(
+                    top_status_row.label.clone(),
+                    egui::FontId::proportional(9.0),
+                    egui::Color32::WHITE,
+                )
+                .rect
+                .width();
+            let chip_width = (text_width + 20.0).clamp(48.0, refs_rect.width());
             let chip_rect = egui::Rect::from_min_size(
                 egui::pos2(refs_rect.left(), refs_rect.top()),
-                egui::vec2(48.0, chip_height),
+                egui::vec2(chip_width, chip_height),
             );
             ui.painter()
                 .rect_filled(chip_rect, 3.0, accent.linear_multiply(0.25));
@@ -1506,23 +1584,55 @@ fn paint_ref_badges(
         badges.sort_by(compare_badges_for_display);
 
         let primary_badge = badges[0].clone();
-        let primary_width = chip_width_for_badge(&primary_badge, refs_rect.width());
+
+        // Check hover region using preliminary unconstrained primary rect
+        let temp_primary_width = chip_width_for_badge(ui, &primary_badge, refs_rect.width());
+        let temp_primary_rect = egui::Rect::from_min_size(
+            egui::pos2(refs_rect.left(), refs_rect.center().y - chip_height * 0.5),
+            egui::vec2(temp_primary_width, chip_height),
+        );
+        let hover_pos = ui.input(|input| input.pointer.hover_pos());
+        let is_hovered = hover_pos
+            .map(|pos| temp_primary_rect.contains(pos))
+            .unwrap_or(false);
+
+        let num_extra = badges.len() - 1;
+        let has_extra = num_extra > 0 && !is_hovered;
+
+        let extra_width = if has_extra {
+            let extra_label = format!("+{}", num_extra);
+            let extra_text_width = ui
+                .painter()
+                .layout_no_wrap(
+                    extra_label,
+                    egui::FontId::proportional(9.0),
+                    egui::Color32::WHITE,
+                )
+                .rect
+                .width();
+            extra_text_width + 10.0
+        } else {
+            0.0
+        };
+
+        let max_primary_width = if has_extra {
+            (refs_rect.width() - extra_width - 4.0).max(20.0)
+        } else {
+            refs_rect.width()
+        };
+
+        let primary_width = chip_width_for_badge(ui, &primary_badge, max_primary_width);
         let primary_rect = egui::Rect::from_min_size(
             egui::pos2(refs_rect.left(), refs_rect.center().y - chip_height * 0.5),
             egui::vec2(primary_width, chip_height),
         );
-
-        let hover_pos = ui.input(|input| input.pointer.hover_pos());
-        let is_hovered = hover_pos
-            .map(|pos| primary_rect.contains(pos))
-            .unwrap_or(false);
 
         let mut visible_chips = vec![(primary_badge.clone(), primary_rect)];
 
         if is_hovered && badges.len() > 1 {
             let mut stack_top = primary_rect.top() - 2.0;
             for badge in badges.iter().skip(1).cloned() {
-                let width = chip_width_for_badge(&badge, refs_rect.width());
+                let width = chip_width_for_badge(ui, &badge, refs_rect.width());
                 stack_top -= chip_height + 2.0;
                 visible_chips.push((
                     badge,
@@ -1543,12 +1653,68 @@ fn paint_ref_badges(
         for (badge, chip_rect) in visible_chips.into_iter().rev() {
             paint_ref_chip(ui, chip_rect, &badge, color_for_ref(&badge));
         }
+
+        if has_extra {
+            let extra_label = format!("+{}", num_extra);
+            let extra_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    refs_rect.left() + primary_width + 4.0,
+                    refs_rect.center().y - chip_height * 0.5,
+                ),
+                egui::vec2(extra_width, chip_height),
+            );
+
+            let bg_color = egui::Color32::from_rgb(52, 52, 52);
+            let border_color = egui::Color32::from_rgb(100, 100, 100);
+            ui.painter().rect_filled(extra_rect, 3.0, bg_color);
+            ui.painter().rect_stroke(
+                extra_rect,
+                3.0,
+                egui::Stroke::new(1.0_f32, border_color),
+                egui::StrokeKind::Inside,
+            );
+
+            clipped_text(
+                ui,
+                extra_rect,
+                extra_rect.center(),
+                &extra_label,
+                9.0,
+                ui.visuals().text_color(),
+                egui::Align2::CENTER_CENTER,
+            );
+        }
     }
 }
 
-fn chip_width_for_badge(badge: &RefBadge, max_width: f32) -> f32 {
-    let base = if badge.highlighted { 36.0 } else { 30.0 };
-    (badge.label.len() as f32 * 5.4 + base).clamp(48.0, max_width)
+fn chip_width_for_badge(ui: &egui::Ui, badge: &RefBadge, max_width: f32) -> f32 {
+    let font_id = egui::FontId::proportional(9.0);
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(badge.label.clone(), font_id, egui::Color32::WHITE)
+        .rect
+        .width();
+    let mut base = if badge.highlighted { 36.0 } else { 30.0 };
+
+    if badge.kind == RefKind::Branch {
+        if badge.has_local {
+            let laptop_width = ui
+                .painter()
+                .layout_no_wrap(
+                    LAPTOP.to_string(),
+                    egui::FontId::proportional(9.0),
+                    egui::Color32::WHITE,
+                )
+                .rect
+                .width();
+            base += laptop_width + 4.0;
+        }
+        if badge.has_remote {
+            base += 12.0 + 4.0; // avatar width 12 + gap 4
+        }
+    }
+
+    (text_width + base).clamp(48.0, max_width)
 }
 
 fn compare_badges_for_display(left: &RefBadge, right: &RefBadge) -> std::cmp::Ordering {
@@ -1637,7 +1803,11 @@ fn paint_ref_chip(ui: &mut egui::Ui, rect: egui::Rect, badge: &RefBadge, accent:
     ui.painter().rect_filled(rect, 3.0, fill);
 
     // 2. Draw solid opaque background for the icon area (left part)
-    let icon_bg_width = 18.0;
+    let icon_bg_width = if badge.kind == RefKind::Branch && badge.has_local {
+        30.0
+    } else {
+        18.0
+    };
     let left_rect = egui::Rect::from_min_max(
         rect.left_top(),
         egui::pos2(rect.left() + icon_bg_width, rect.bottom()),
@@ -1676,15 +1846,46 @@ fn paint_ref_chip(ui: &mut egui::Ui, rect: egui::Rect, badge: &RefBadge, accent:
 
     // 5. Draw icon centered in the left rect with a dark color for high contrast
     let icon_color = egui::Color32::from_rgb(31, 31, 31);
-    clipped_text(
-        ui,
-        left_rect,
-        left_rect.center(),
-        icon,
-        9.0,
-        icon_color,
-        egui::Align2::CENTER_CENTER,
-    );
+    if badge.kind == RefKind::Branch && badge.has_local {
+        let first_rect = egui::Rect::from_min_max(
+            left_rect.left_top(),
+            egui::pos2(left_rect.left() + 15.0, left_rect.bottom()),
+        );
+        let second_rect = egui::Rect::from_min_max(
+            egui::pos2(left_rect.left() + 15.0, left_rect.top()),
+            left_rect.right_bottom(),
+        );
+
+        clipped_text(
+            ui,
+            first_rect,
+            first_rect.center(),
+            icon,
+            9.0,
+            icon_color,
+            egui::Align2::CENTER_CENTER,
+        );
+
+        clipped_text(
+            ui,
+            second_rect,
+            second_rect.center(),
+            LAPTOP,
+            9.0,
+            icon_color,
+            egui::Align2::CENTER_CENTER,
+        );
+    } else {
+        clipped_text(
+            ui,
+            left_rect,
+            left_rect.center(),
+            icon,
+            9.0,
+            icon_color,
+            egui::Align2::CENTER_CENTER,
+        );
+    }
 
     // 6. Draw label with padding from the icon divider
     let text_start_x = rect.left() + icon_bg_width + 6.0;
@@ -1697,6 +1898,45 @@ fn paint_ref_chip(ui: &mut egui::Ui, rect: egui::Rect, badge: &RefBadge, accent:
         ui.visuals().text_color(),
         egui::Align2::LEFT_CENTER,
     );
+
+    // Draw GitKraken-style sub-icons for branch badges
+    if badge.kind == RefKind::Branch {
+        let font_id = egui::FontId::proportional(9.0);
+        let label_width = ui
+            .painter()
+            .layout_no_wrap(badge.label.clone(), font_id.clone(), egui::Color32::WHITE)
+            .rect
+            .width();
+
+        let current_x = text_start_x + label_width + 4.0;
+
+        if badge.has_remote {
+            let avatar_rect = egui::Rect::from_center_size(
+                egui::pos2(current_x + 6.0, rect.center().y),
+                egui::vec2(12.0, 12.0),
+            );
+            if let Some(ref path) = badge.remote_avatar {
+                let uri = url::Url::from_file_path(path)
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|_| format!("file://{}", path));
+                let image = egui::Image::new(uri).corner_radius(6.0);
+                image.paint_at(ui, avatar_rect);
+            } else {
+                let circle_color = egui::Color32::from_rgb(80, 80, 80);
+                ui.painter()
+                    .circle_filled(avatar_rect.center(), 6.0, circle_color);
+                clipped_text(
+                    ui,
+                    avatar_rect,
+                    avatar_rect.center(),
+                    USER,
+                    7.0,
+                    ui.visuals().text_color(),
+                    egui::Align2::CENTER_CENTER,
+                );
+            }
+        }
+    }
 
     if badge.highlighted {
         let pencil_rect = egui::Rect::from_min_size(
@@ -2025,18 +2265,81 @@ fn paint_vertical_commit_row(
     let mut current_badge_x = details_left;
     let chip_height = 16.0;
 
-    for badge in &row_badges {
-        let max_width = details_right - current_badge_x - 40.0;
-        if max_width < 20.0 {
+    let max_refs_x = details_right - 40.0; // Reserve 40px for message
+
+    for (i, badge) in row_badges.iter().enumerate() {
+        let remaining = row_badges.len() - i;
+        let width = chip_width_for_badge(ui, badge, max_refs_x - current_badge_x);
+
+        let needs_extra_indicator = remaining > 1;
+        let next_extra_label = format!("+{}", remaining - 1);
+        let next_extra_width = if needs_extra_indicator {
+            ui.painter()
+                .layout_no_wrap(
+                    next_extra_label,
+                    egui::FontId::proportional(9.0),
+                    egui::Color32::WHITE,
+                )
+                .rect
+                .width()
+                + 10.0
+        } else {
+            0.0
+        };
+        let space_needed_after = if needs_extra_indicator {
+            next_extra_width + 6.0
+        } else {
+            0.0
+        };
+
+        if current_badge_x + width + space_needed_after <= max_refs_x {
+            let chip_rect = egui::Rect::from_min_size(
+                egui::pos2(current_badge_x, bottom_center_y - chip_height * 0.5),
+                egui::vec2(width, chip_height),
+            );
+            paint_ref_chip(ui, chip_rect, badge, color_for_ref(badge));
+            current_badge_x += width + 6.0;
+        } else {
+            // Cannot fit this badge. Draw +N for all remaining
+            let final_extra_label = format!("+{}", remaining);
+            let final_extra_text_width = ui
+                .painter()
+                .layout_no_wrap(
+                    final_extra_label.clone(),
+                    egui::FontId::proportional(9.0),
+                    egui::Color32::WHITE,
+                )
+                .rect
+                .width();
+            let final_extra_width = final_extra_text_width + 10.0;
+
+            if current_badge_x + final_extra_width <= max_refs_x {
+                let extra_rect = egui::Rect::from_min_size(
+                    egui::pos2(current_badge_x, bottom_center_y - chip_height * 0.5),
+                    egui::vec2(final_extra_width, chip_height),
+                );
+                let bg_color = egui::Color32::from_rgb(52, 52, 52);
+                let border_color = egui::Color32::from_rgb(100, 100, 100);
+                ui.painter().rect_filled(extra_rect, 3.0, bg_color);
+                ui.painter().rect_stroke(
+                    extra_rect,
+                    3.0,
+                    egui::Stroke::new(1.0_f32, border_color),
+                    egui::StrokeKind::Inside,
+                );
+                clipped_text(
+                    ui,
+                    extra_rect,
+                    extra_rect.center(),
+                    &final_extra_label,
+                    9.0,
+                    ui.visuals().text_color(),
+                    egui::Align2::CENTER_CENTER,
+                );
+                current_badge_x += final_extra_width + 6.0;
+            }
             break;
         }
-        let width = chip_width_for_badge(badge, max_width);
-        let chip_rect = egui::Rect::from_min_size(
-            egui::pos2(current_badge_x, bottom_center_y - chip_height * 0.5),
-            egui::vec2(width, chip_height),
-        );
-        paint_ref_chip(ui, chip_rect, badge, color_for_ref(badge));
-        current_badge_x += width + 6.0;
     }
 
     let msg_subject = commit_subject(&entry.data.message);
@@ -2296,6 +2599,9 @@ mod tests {
             kind: RefKind::Tag,
             highlighted: false,
             connect_to_graph: true,
+            has_local: false,
+            has_remote: false,
+            remote_avatar: None,
         };
 
         assert_eq!(
