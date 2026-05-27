@@ -38,8 +38,9 @@ pub struct SidebarState {
     pub releases_expanded: bool,
     pub releases_show_all: bool,
     pub packages_expanded: bool,
-    pub repo_tree_state: crate::ui::filetree::TreeState,
+    pub repo_tree_state: crate::ui::core::filetree::TreeState,
     pub search_query: String,
+    pub filter_query: String,
     pub cached_head_hash: Option<String>,
     pub cached_tracked_files: Vec<String>,
     pub collapsed_remotes: std::collections::HashSet<String>,
@@ -60,8 +61,9 @@ impl Default for SidebarState {
             releases_expanded: false,
             releases_show_all: false,
             packages_expanded: false,
-            repo_tree_state: crate::ui::filetree::TreeState::default(),
+            repo_tree_state: crate::ui::core::filetree::TreeState::default(),
             search_query: String::new(),
+            filter_query: String::new(),
             cached_head_hash: None,
             cached_tracked_files: Vec::new(),
             collapsed_remotes: std::collections::HashSet::new(),
@@ -107,6 +109,12 @@ pub fn show_cached(
     let height = ui.available_height();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(SIDEBAR_WIDTH, height), egui::Sense::hover());
 
+    let text_edit_id = egui::Id::new("sidebar_filter_input");
+    if ui.input(|i| i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(egui::Key::F)) {
+        sidebar_state.current_tab = SidebarTab::Repository;
+        ui.ctx().memory_mut(|mem| mem.request_focus(text_edit_id));
+    }
+
     let bg = egui::Color32::from_rgb(39, 39, 39);
     let selected = egui::Color32::from_rgb(66, 66, 66);
     let stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(72, 72, 72));
@@ -143,21 +151,98 @@ pub fn show_cached(
             paint_nav_row(ui, rect, y, LIST, "All Commits", true, text, selected);
             y += ROW_HEIGHT;
 
-            y += 8.0;
-            paint_filter(ui, rect, y, muted, stroke);
-            y += FILTER_HEIGHT + 12.0;
+            let query = sidebar_state.filter_query.to_lowercase();
 
             let local: Vec<_> = app_state
                 .cached_branches
                 .iter()
                 .filter(|b| !b.is_remote)
+                .filter(|b| query.is_empty() || b.name.to_lowercase().contains(&query))
                 .collect();
             let remote: Vec<_> = app_state
                 .cached_branches
                 .iter()
                 .filter(|b| b.is_remote && !b.name.ends_with("/HEAD"))
+                .filter(|b| query.is_empty() || b.name.to_lowercase().contains(&query))
                 .collect();
 
+            let tags: Vec<_> = app_state
+                .cached_tags
+                .iter()
+                .filter(|t| query.is_empty() || t.name.to_lowercase().contains(&query))
+                .collect();
+            let stashes: Vec<_> = app_state
+                .cached_stashes
+                .iter()
+                .enumerate()
+                .filter(|(idx, s)| {
+                    query.is_empty()
+                        || s.message.to_lowercase().contains(&query)
+                        || format!("stash@{{{}}}", idx).contains(&query)
+                        || s.hash.to_lowercase().contains(&query)
+                })
+                .collect();
+            let prs: Vec<_> = app_state
+                .github_pull_requests
+                .iter()
+                .filter(|pr| {
+                    query.is_empty()
+                        || pr.title.to_lowercase().contains(&query)
+                        || pr.number.to_string().contains(&query)
+                })
+                .collect();
+            let runs: Vec<_> = app_state
+                .github_action_runs
+                .iter()
+                .filter(|run| {
+                    query.is_empty()
+                        || run.name.to_lowercase().contains(&query)
+                        || run.head_branch.to_lowercase().contains(&query)
+                        || run.run_number.to_string().contains(&query)
+                })
+                .collect();
+            let releases: Vec<_> = app_state
+                .github_releases
+                .iter()
+                .filter(|rel| {
+                    query.is_empty()
+                        || rel.tag_name.to_lowercase().contains(&query)
+                        || rel
+                            .name
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_lowercase()
+                            .contains(&query)
+                })
+                .collect();
+            let packages: Vec<_> = app_state
+                .github_packages
+                .iter()
+                .filter(|pkg| query.is_empty() || pkg.name.to_lowercase().contains(&query))
+                .collect();
+
+            let total_searchable = local.len()
+                + remote.len()
+                + tags.len()
+                + stashes.len()
+                + prs.len()
+                + runs.len()
+                + releases.len()
+                + packages.len();
+
+            y += 8.0;
+            paint_filter(ui, rect, y, sidebar_state, text, muted, stroke);
+
+            let count_y = y + FILTER_HEIGHT + 6.0;
+            painter_text(
+                ui,
+                egui::pos2(rect.left() + 10.0, count_y),
+                &format!("viewing : {}", total_searchable),
+                10.0,
+                muted.linear_multiply(0.7),
+                egui::Align2::LEFT_CENTER,
+            );
+            y += FILTER_HEIGHT + 18.0;
             let mut expanded_sections = Vec::new();
             let mut collapsed_sections = Vec::new();
 
@@ -175,42 +260,42 @@ pub fn show_cached(
                     collapsed_sections.push(SectionKind::Remotes);
                 }
             }
-            if !app_state.cached_tags.is_empty() {
+            if !tags.is_empty() {
                 if sidebar_state.tags_expanded {
                     expanded_sections.push(SectionKind::Tags);
                 } else {
                     collapsed_sections.push(SectionKind::Tags);
                 }
             }
-            if !app_state.cached_stashes.is_empty() {
+            if !stashes.is_empty() {
                 if sidebar_state.stashes_expanded {
                     expanded_sections.push(SectionKind::Stashes);
                 } else {
                     collapsed_sections.push(SectionKind::Stashes);
                 }
             }
-            if !app_state.github_pull_requests.is_empty() {
+            if !prs.is_empty() {
                 if sidebar_state.prs_expanded {
                     expanded_sections.push(SectionKind::PRs);
                 } else {
                     collapsed_sections.push(SectionKind::PRs);
                 }
             }
-            if !app_state.github_action_runs.is_empty() {
+            if !runs.is_empty() {
                 if sidebar_state.runs_expanded {
                     expanded_sections.push(SectionKind::Runs);
                 } else {
                     collapsed_sections.push(SectionKind::Runs);
                 }
             }
-            if !app_state.github_releases.is_empty() {
+            if !releases.is_empty() {
                 if sidebar_state.releases_expanded {
                     expanded_sections.push(SectionKind::Releases);
                 } else {
                     collapsed_sections.push(SectionKind::Releases);
                 }
             }
-            if !app_state.github_packages.is_empty() {
+            if !packages.is_empty() {
                 if sidebar_state.packages_expanded {
                     expanded_sections.push(SectionKind::Packages);
                 } else {
@@ -230,7 +315,7 @@ pub fn show_cached(
 
                 let section_h = match section {
                     SectionKind::Runs => {
-                        let total = app_state.github_action_runs.len();
+                        let total = runs.len();
                         if total > 5 {
                             let show_count = if sidebar_state.runs_show_all {
                                 total
@@ -247,7 +332,7 @@ pub fn show_cached(
                             SectionKind::Local => local.len(),
                             SectionKind::Remotes => remote.len(),
                             SectionKind::Tags => {
-                                let total = app_state.cached_tags.len();
+                                let total = tags.len();
                                 if total > 5 {
                                     if sidebar_state.tags_show_all {
                                         total + 1
@@ -258,10 +343,10 @@ pub fn show_cached(
                                     total
                                 }
                             }
-                            SectionKind::Stashes => app_state.cached_stashes.len(),
-                            SectionKind::PRs => app_state.github_pull_requests.len(),
+                            SectionKind::Stashes => stashes.len(),
+                            SectionKind::PRs => prs.len(),
                             SectionKind::Releases => {
-                                let total = app_state.github_releases.len();
+                                let total = releases.len();
                                 if total > 5 {
                                     if sidebar_state.releases_show_all {
                                         total + 1
@@ -272,7 +357,7 @@ pub fn show_cached(
                                     total
                                 }
                             }
-                            SectionKind::Packages => app_state.github_packages.len(),
+                            SectionKind::Packages => packages.len(),
                             SectionKind::Runs => unreachable!(),
                         };
                         ROW_HEIGHT + count as f32 * ROW_HEIGHT
@@ -699,16 +784,16 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
-                                            Some(app_state.cached_tags.len()),
+                                            Some(tags.len()),
                                         );
                                         local_y += ROW_HEIGHT;
 
-                                        let total_tags = app_state.cached_tags.len();
+                                        let total_tags = tags.len();
                                         let tags_to_show =
                                             if total_tags > 5 && !sidebar_state.tags_show_all {
-                                                &app_state.cached_tags[..5]
+                                                &tags[..5]
                                             } else {
-                                                &app_state.cached_tags[..]
+                                                &tags[..]
                                             };
 
                                         for tag in tags_to_show {
@@ -772,12 +857,10 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
-                                            Some(app_state.cached_stashes.len()),
+                                            Some(stashes.len()),
                                         );
                                         local_y += ROW_HEIGHT;
-                                        for (idx, stash) in
-                                            app_state.cached_stashes.iter().enumerate()
-                                        {
+                                        for &(idx, stash) in &stashes {
                                             let label =
                                                 format!("stash@{{{}}}: {}", idx, stash.message);
                                             let response = paint_tree_row(
@@ -826,10 +909,10 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
-                                            Some(app_state.github_pull_requests.len()),
+                                            Some(prs.len()),
                                         );
                                         local_y += ROW_HEIGHT;
-                                        for pr in &app_state.github_pull_requests {
+                                        for pr in &prs {
                                             let label = format!("#{} {}", pr.number, pr.title);
                                             let response = paint_tree_row(
                                                 ui,
@@ -866,16 +949,16 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             app_state.github_loading,
-                                            Some(app_state.github_action_runs.len()),
+                                            Some(runs.len()),
                                         );
                                         local_y += ROW_HEIGHT;
 
-                                        let total_runs = app_state.github_action_runs.len();
+                                        let total_runs = runs.len();
                                         let runs_to_show =
                                             if total_runs > 5 && !sidebar_state.runs_show_all {
-                                                &app_state.github_action_runs[..5]
+                                                &runs[..5]
                                             } else {
-                                                &app_state.github_action_runs[..]
+                                                &runs[..]
                                             };
 
                                         for run in runs_to_show {
@@ -976,17 +1059,17 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
-                                            Some(app_state.github_releases.len()),
+                                            Some(releases.len()),
                                         );
                                         local_y += ROW_HEIGHT;
 
-                                        let total_releases = app_state.github_releases.len();
+                                        let total_releases = releases.len();
                                         let releases_to_show = if total_releases > 5
                                             && !sidebar_state.releases_show_all
                                         {
-                                            &app_state.github_releases[..5]
+                                            &releases[..5]
                                         } else {
-                                            &app_state.github_releases[..]
+                                            &releases[..]
                                         };
 
                                         for release in releases_to_show {
@@ -1057,10 +1140,10 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
-                                            Some(app_state.github_packages.len()),
+                                            Some(packages.len()),
                                         );
                                         local_y += ROW_HEIGHT;
-                                        for pkg in &app_state.github_packages {
+                                        for pkg in &packages {
                                             let response = paint_tree_row(
                                                 ui,
                                                 content_rect,
@@ -1135,7 +1218,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
-                            Some(app_state.cached_tags.len()),
+                            Some(tags.len()),
                         );
                     }
                     SectionKind::Stashes => {
@@ -1149,7 +1232,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
-                            Some(app_state.cached_stashes.len()),
+                            Some(stashes.len()),
                         );
                     }
                     SectionKind::PRs => {
@@ -1163,7 +1246,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
-                            Some(app_state.github_pull_requests.len()),
+                            Some(prs.len()),
                         );
                     }
                     SectionKind::Runs => {
@@ -1177,7 +1260,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             app_state.github_loading,
-                            Some(app_state.github_action_runs.len()),
+                            Some(runs.len()),
                         );
                     }
                     SectionKind::Releases => {
@@ -1191,7 +1274,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
-                            Some(app_state.github_releases.len()),
+                            Some(releases.len()),
                         );
                     }
                     SectionKind::Packages => {
@@ -1205,7 +1288,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
-                            Some(app_state.github_packages.len()),
+                            Some(packages.len()),
                         );
                     }
                 }
@@ -1359,9 +1442,14 @@ pub fn show_cached(
                 }
             }
 
-            let mut tree_items: Vec<crate::ui::filetree::FileTreeItem> = items_map
+            let mut tree_items: Vec<crate::ui::core::filetree::FileTreeItem> = items_map
                 .into_iter()
-                .map(|(path, change_kind)| crate::ui::filetree::FileTreeItem { path, change_kind })
+                .map(
+                    |(path, change_kind)| crate::ui::core::filetree::FileTreeItem {
+                        path,
+                        change_kind,
+                    },
+                )
                 .collect();
 
             tree_items.sort_by(|a, b| {
@@ -1412,7 +1500,7 @@ pub fn show_cached(
                     .max_rect(scroll_rect)
                     .layout(egui::Layout::top_down(egui::Align::Min)),
                 |ui| {
-                    crate::ui::filetree::paint_tree_tab(
+                    crate::ui::core::filetree::paint_tree_tab(
                         ui,
                         &mut sidebar_state.repo_tree_state,
                         &tree_items,
@@ -1560,31 +1648,117 @@ fn paint_mode_bar(
 }
 
 fn paint_filter(
-    ui: &egui::Ui,
+    ui: &mut egui::Ui,
     rect: egui::Rect,
     y: f32,
+    sidebar_state: &mut SidebarState,
+    text_color: egui::Color32,
     muted: egui::Color32,
     stroke: egui::Stroke,
 ) {
-    let filter = row_rect(rect, y, FILTER_HEIGHT).shrink2(egui::vec2(10.0, 2.0));
+    let filter_rect = row_rect(rect, y, FILTER_HEIGHT).shrink2(egui::vec2(10.0, 2.0));
+
+    // Draw background
+    let bg_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8);
+    ui.painter().rect_filled(filter_rect, 4.0, bg_color);
     ui.painter()
-        .rect_stroke(filter, 0.0, stroke, egui::StrokeKind::Inside);
+        .rect_stroke(filter_rect, 4.0, stroke, egui::StrokeKind::Inside);
+
+    // Magnifying glass icon on the left
+    let icon_x = filter_rect.left() + 14.0;
     painter_text(
         ui,
-        egui::pos2(filter.left() + 16.0, filter.center().y),
+        egui::pos2(icon_x, filter_rect.center().y),
         MAGNIFYING_GLASS,
-        14.0,
+        12.0,
         muted,
         egui::Align2::CENTER_CENTER,
     );
-    painter_text(
-        ui,
-        egui::pos2(filter.left() + 32.0, filter.center().y),
-        "Filter",
-        13.0,
-        muted,
-        egui::Align2::LEFT_CENTER,
+
+    // Padding for the text edit
+    let edit_min_x = filter_rect.left() + 24.0;
+    let edit_max_x = filter_rect.right() - 24.0; // leave space for clear button or shortcut badge
+    let edit_rect = egui::Rect::from_min_max(
+        egui::pos2(edit_min_x, filter_rect.top() + 3.0),
+        egui::pos2(edit_max_x, filter_rect.bottom() - 3.0),
     );
+
+    let text_edit = egui::TextEdit::singleline(&mut sidebar_state.filter_query)
+        .hint_text("Filter")
+        .frame(egui::Frame::NONE)
+        .text_color(text_color)
+        .id(egui::Id::new("sidebar_filter_input"));
+
+    let response = ui.put(edit_rect, text_edit);
+
+    // Draw keyboard shortcut badge on the right if query is empty and not focused
+    let show_shortcut = sidebar_state.filter_query.is_empty() && !response.has_focus();
+    if show_shortcut {
+        let badge_text = "Ctrl+Alt+F";
+        let font_id = egui::FontId::proportional(8.0);
+        let galley = ui.painter().layout_no_wrap(
+            badge_text.to_string(),
+            font_id,
+            muted.linear_multiply(0.6),
+        );
+        let badge_w = galley.rect.width() + 6.0;
+        let badge_h = 13.0;
+        let badge_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                filter_rect.right() - badge_w - 6.0,
+                filter_rect.center().y - badge_h * 0.5,
+            ),
+            egui::pos2(
+                filter_rect.right() - 6.0,
+                filter_rect.center().y + badge_h * 0.5,
+            ),
+        );
+        ui.painter().rect_filled(
+            badge_rect,
+            2.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+        );
+        ui.painter().galley(
+            egui::pos2(badge_rect.left() + 3.0, badge_rect.top() + 1.0),
+            galley,
+            muted.linear_multiply(0.6),
+        );
+    }
+
+    // Draw clear button on the right if query is not empty
+    if !sidebar_state.filter_query.is_empty() {
+        let clear_btn_rect = egui::Rect::from_center_size(
+            egui::pos2(filter_rect.right() - 14.0, filter_rect.center().y),
+            egui::vec2(14.0, 14.0),
+        );
+        let clear_resp = ui.interact(
+            clear_btn_rect,
+            ui.make_persistent_id("sidebar_filter_clear_btn"),
+            egui::Sense::click(),
+        );
+        if clear_resp.hovered() {
+            ui.painter().rect_filled(
+                clear_btn_rect,
+                2.0,
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+            );
+        }
+        painter_text(
+            ui,
+            clear_btn_rect.center(),
+            "×",
+            12.0,
+            if clear_resp.hovered() {
+                text_color
+            } else {
+                muted
+            },
+            egui::Align2::CENTER_CENTER,
+        );
+        if clear_resp.clicked() {
+            sidebar_state.filter_query.clear();
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

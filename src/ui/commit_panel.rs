@@ -788,7 +788,7 @@ fn file_row_unstaged(
         egui::pos2(rect.left() + 10.0, rect.center().y),
         egui::vec2(13.0, 13.0),
     );
-    crate::ui::filetree::paint_file_icon_rect(ui, icon_rect, &file.path, icon_color);
+    crate::ui::core::filetree::paint_file_icon_rect(ui, icon_rect, &file.path, icon_color);
 
     let path_x = icon_x + 16.0;
     let path_width = rect.width() - 80.0 - (path_x - rect.left());
@@ -862,7 +862,7 @@ fn file_row_unstaged_cached(
         egui::pos2(rect.left() + 10.0, rect.center().y),
         egui::vec2(13.0, 13.0),
     );
-    crate::ui::filetree::paint_file_icon_rect(ui, icon_rect, &file.path, icon_color);
+    crate::ui::core::filetree::paint_file_icon_rect(ui, icon_rect, &file.path, icon_color);
 
     let path_x = icon_x + 16.0;
     let path_width = rect.width() - 80.0 - (path_x - rect.left());
@@ -936,7 +936,7 @@ fn file_row_staged(
         egui::pos2(rect.left() + 10.0, rect.center().y),
         egui::vec2(13.0, 13.0),
     );
-    crate::ui::filetree::paint_file_icon_rect(ui, icon_rect, &file.path, icon_color);
+    crate::ui::core::filetree::paint_file_icon_rect(ui, icon_rect, &file.path, icon_color);
 
     let path_x = icon_x + 16.0;
     let path_width = rect.width() - 80.0 - (path_x - rect.left());
@@ -1011,7 +1011,7 @@ fn file_row_staged_cached(
         egui::pos2(rect.left() + 10.0, rect.center().y),
         egui::vec2(13.0, 13.0),
     );
-    crate::ui::filetree::paint_file_icon_rect(ui, icon_rect, &file.path, icon_color);
+    crate::ui::core::filetree::paint_file_icon_rect(ui, icon_rect, &file.path, icon_color);
 
     let path_x = icon_x + 16.0;
     let path_width = rect.width() - 80.0 - (path_x - rect.left());

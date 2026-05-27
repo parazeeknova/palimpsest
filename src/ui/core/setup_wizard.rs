@@ -64,7 +64,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut SetupWizardState) -> WizardAction {
                 ui.allocate_ui(egui::vec2(140.0, ui.available_height()), |ui| {
                     ui.vertical_centered(|ui| {
                         ui.add_space(24.0);
-                        let logo = egui::Image::new(egui::include_image!("../assets/logo.svg"))
+                        let logo = egui::Image::new(egui::include_image!("../../assets/logo.svg"))
                             .fit_to_exact_size(egui::vec2(128.0, 128.0))
                             .tint(egui::Color32::from_white_alpha(120));
                         ui.add(logo);

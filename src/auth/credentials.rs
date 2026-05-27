@@ -15,6 +15,7 @@ pub struct StoredCredentials {
     pub github_user: Option<super::github_oauth::GitHubUser>,
     pub git_name: Option<String>,
     pub git_email: Option<String>,
+    pub git_ssh_passphrase: Option<String>,
     pub setup_completed: bool,
 }
 
@@ -316,6 +317,12 @@ pub fn clear_github_auth(credentials: &mut StoredCredentials, persist: bool) {
     }
 }
 
+pub fn save_git_ssh_passphrase(passphrase: Option<String>) -> Result<(), String> {
+    let mut credentials = load_credentials();
+    credentials.git_ssh_passphrase = passphrase;
+    save_credentials(&credentials)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +354,7 @@ mod tests {
             github_user: None,
             git_name: Some("Test User".into()),
             git_email: Some("test@example.com".into()),
+            git_ssh_passphrase: None,
             setup_completed: true,
         };
         let serialized = serde_json::to_string(&credentials).expect("serialization should succeed");
@@ -369,6 +377,7 @@ mod tests {
             }),
             git_name: Some("Test".into()),
             git_email: Some("test@example.com".into()),
+            git_ssh_passphrase: None,
             setup_completed: true,
         };
         clear_github_auth(&mut credentials, false);
