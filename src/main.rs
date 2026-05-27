@@ -895,8 +895,6 @@ impl PalimpsestApp {
             QuickLaunchAction::Fetch => {
                 tracing::info!("Quick launch: fetch");
                 self.quick_launch_busy = Some(QuickLaunchAction::Fetch);
-                self.store
-                    .dispatch(AppAction::SetRepoError(Some("Fetching...".to_string())));
                 self.run_background_git_job(ctx.clone(), Some(QuickLaunchAction::Fetch), |repo| {
                     repo.fetch()
                 });
@@ -904,8 +902,6 @@ impl PalimpsestApp {
             QuickLaunchAction::Pull => {
                 tracing::info!("Quick launch: pull");
                 self.quick_launch_busy = Some(QuickLaunchAction::Pull);
-                self.store
-                    .dispatch(AppAction::SetRepoError(Some("Pulling...".to_string())));
                 self.run_background_git_job(ctx.clone(), Some(QuickLaunchAction::Pull), |repo| {
                     repo.pull()
                 });
@@ -913,8 +909,6 @@ impl PalimpsestApp {
             QuickLaunchAction::Push => {
                 tracing::info!("Quick launch: push");
                 self.quick_launch_busy = Some(QuickLaunchAction::Push);
-                self.store
-                    .dispatch(AppAction::SetRepoError(Some("Pushing...".to_string())));
                 self.run_background_git_job(ctx.clone(), Some(QuickLaunchAction::Push), |repo| {
                     repo.push()
                 });
@@ -2289,6 +2283,7 @@ impl eframe::App for PalimpsestApp {
             &state,
             self.current_repo_owned_by_authed_user,
             self.body_state.layout,
+            self.quick_launch_busy.clone(),
         );
         let ctx = ui.ctx().clone();
 

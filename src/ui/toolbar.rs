@@ -1,9 +1,10 @@
 use crate::state::AppState;
 use crate::ui::body::CommitDrawerLayout;
+use crate::ui::command_palette::QuickLaunchAction;
 use eframe::egui;
 use egui_phosphor::regular::{
-    ARROW_CLOCKWISE, ARROW_COUNTER_CLOCKWISE, ARROWS_CLOCKWISE, BROWSERS, CARET_DOWN, CHECK,
-    COLUMNS, FOLDER, GIT_BRANCH, GIT_COMMIT, GIT_FORK, GIT_PULL_REQUEST, GLOBE_SIMPLE, ROWS,
+    ARROW_COUNTER_CLOCKWISE, ARROW_LINE_DOWN, ARROW_LINE_UP, ARROWS_CLOCKWISE, BROWSERS,
+    CARET_DOWN, CHECK, COLUMNS, FOLDER, GIT_BRANCH, GIT_COMMIT, GIT_FORK, GLOBE_SIMPLE, ROWS,
     SIDEBAR, STACK, TAG, TERMINAL_WINDOW, TEXT_ALIGN_LEFT, USER_CIRCLE,
 };
 
@@ -37,6 +38,7 @@ pub fn show(
     state: &AppState,
     current_repo_owned_by_authed_user: Option<bool>,
     current_layout: CommitDrawerLayout,
+    busy_action: Option<QuickLaunchAction>,
 ) -> ToolbarAction {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, TOOLBAR_HEIGHT), egui::Sense::hover());
@@ -67,7 +69,7 @@ pub fn show(
         left_rect.shrink2(egui::vec2(8.0, 3.0)),
         "toolbar_left",
         egui::Layout::left_to_right(egui::Align::Center),
-        |ui| left_panel(ui, &mut toolbar_action),
+        |ui| left_panel(ui, &mut toolbar_action, busy_action.as_ref()),
     );
     child_ui(
         ui,
@@ -89,7 +91,14 @@ pub fn show(
         right_rect.shrink2(egui::vec2(8.0, 3.0)),
         "toolbar_right",
         egui::Layout::right_to_left(egui::Align::Center),
-        |ui| right_panel(ui, &mut toolbar_action, current_layout),
+        |ui| {
+            right_panel(
+                ui,
+                &mut toolbar_action,
+                current_layout,
+                busy_action.as_ref(),
+            )
+        },
     );
     toolbar_action
 }
@@ -131,31 +140,87 @@ fn child_ui<R>(
     )
 }
 
-fn left_panel(ui: &mut egui::Ui, action: &mut ToolbarAction) {
+fn left_panel(
+    ui: &mut egui::Ui,
+    action: &mut ToolbarAction,
+    busy_action: Option<&QuickLaunchAction>,
+) {
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-    if toolbar_button(ui, QUICK_ACTION_WIDTH, FOLDER, "Quick Launch", None) {
+    let toolbar_enabled = busy_action.is_none();
+    if toolbar_button(
+        ui,
+        ToolbarButtonArgs {
+            width: QUICK_ACTION_WIDTH,
+            icon: FOLDER,
+            label: "Quick Launch",
+            suffix: None,
+            enabled: toolbar_enabled,
+            busy: false,
+        },
+    ) {
         *action = ToolbarAction::QuickLaunch;
     }
-    if toolbar_button(ui, ACTION_WIDTH, ARROW_COUNTER_CLOCKWISE, "Fetch", None) {
+    if toolbar_button(
+        ui,
+        ToolbarButtonArgs {
+            width: ACTION_WIDTH,
+            icon: ARROW_COUNTER_CLOCKWISE,
+            label: "Fetch",
+            suffix: None,
+            enabled: toolbar_enabled,
+            busy: busy_action.is_some_and(|busy| busy == &QuickLaunchAction::Fetch),
+        },
+    ) {
         *action = ToolbarAction::Fetch;
     }
-    if toolbar_button(ui, ACTION_WIDTH, ARROW_CLOCKWISE, "Pull", None) {
+    if toolbar_button(
+        ui,
+        ToolbarButtonArgs {
+            width: ACTION_WIDTH,
+            icon: ARROW_LINE_DOWN,
+            label: "Pull",
+            suffix: None,
+            enabled: toolbar_enabled,
+            busy: busy_action.is_some_and(|busy| busy == &QuickLaunchAction::Pull),
+        },
+    ) {
         *action = ToolbarAction::Pull;
     }
-    if toolbar_button(ui, ACTION_WIDTH, GIT_PULL_REQUEST, "Push", None) {
+    if toolbar_button(
+        ui,
+        ToolbarButtonArgs {
+            width: ACTION_WIDTH,
+            icon: ARROW_LINE_UP,
+            label: "Push",
+            suffix: None,
+            enabled: toolbar_enabled,
+            busy: busy_action.is_some_and(|busy| busy == &QuickLaunchAction::Push),
+        },
+    ) {
         *action = ToolbarAction::Push;
     }
-    toolbar_menu_button(ui, ACTION_WIDTH, STACK, "Stash", Some(CARET_DOWN), |ui| {
-        if ui.button("Stash changes").clicked() {
-            *action = ToolbarAction::StashSave;
-        }
-        if ui.button("Apply stash").clicked() {
-            *action = ToolbarAction::StashApply;
-        }
-        if ui.button("Pop stash").clicked() {
-            *action = ToolbarAction::StashPop;
-        }
-    });
+    toolbar_menu_button(
+        ui,
+        ToolbarMenuButtonArgs {
+            width: ACTION_WIDTH,
+            icon: STACK,
+            label: "Stash",
+            suffix: Some(CARET_DOWN),
+            enabled: toolbar_enabled,
+            busy: false,
+        },
+        |ui| {
+            if ui.button("Stash changes").clicked() {
+                *action = ToolbarAction::StashSave;
+            }
+            if ui.button("Apply stash").clicked() {
+                *action = ToolbarAction::StashApply;
+            }
+            if ui.button("Pop stash").clicked() {
+                *action = ToolbarAction::StashPop;
+            }
+        },
+    );
 }
 
 fn center_panel(
@@ -448,15 +513,35 @@ fn center_panel(
     );
 }
 
-fn right_panel(ui: &mut egui::Ui, action: &mut ToolbarAction, current_layout: CommitDrawerLayout) {
+fn right_panel(
+    ui: &mut egui::Ui,
+    action: &mut ToolbarAction,
+    current_layout: CommitDrawerLayout,
+    busy_action: Option<&QuickLaunchAction>,
+) {
     ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-    toolbar_button(ui, ACTION_WIDTH, BROWSERS, "Workspace", Some(CARET_DOWN));
+    let toolbar_enabled = busy_action.is_none();
+    toolbar_button(
+        ui,
+        ToolbarButtonArgs {
+            width: ACTION_WIDTH,
+            icon: BROWSERS,
+            label: "Workspace",
+            suffix: Some(CARET_DOWN),
+            enabled: toolbar_enabled,
+            busy: false,
+        },
+    );
     toolbar_menu_button(
         ui,
-        ACTION_WIDTH,
-        SIDEBAR,
-        "Appearance",
-        Some(CARET_DOWN),
+        ToolbarMenuButtonArgs {
+            width: ACTION_WIDTH,
+            icon: SIDEBAR,
+            label: "Appearance",
+            suffix: Some(CARET_DOWN),
+            enabled: toolbar_enabled,
+            busy: false,
+        },
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 1.0);
             ui.label(
@@ -539,100 +624,153 @@ fn right_panel(ui: &mut egui::Ui, action: &mut ToolbarAction, current_layout: Co
             }
         },
     );
-    toolbar_button(ui, ACTION_WIDTH, TERMINAL_WINDOW, "Console", None);
     toolbar_button(
         ui,
-        ACTION_WIDTH,
-        ARROWS_CLOCKWISE,
-        "Open in",
-        Some(CARET_DOWN),
+        ToolbarButtonArgs {
+            width: ACTION_WIDTH,
+            icon: TERMINAL_WINDOW,
+            label: "Console",
+            suffix: None,
+            enabled: toolbar_enabled,
+            busy: false,
+        },
     );
-    if toolbar_button(ui, ACTION_WIDTH, GIT_FORK, "New Branch", None) {
+    toolbar_button(
+        ui,
+        ToolbarButtonArgs {
+            width: ACTION_WIDTH,
+            icon: ARROWS_CLOCKWISE,
+            label: "Open in",
+            suffix: Some(CARET_DOWN),
+            enabled: toolbar_enabled,
+            busy: false,
+        },
+    );
+    if toolbar_button(
+        ui,
+        ToolbarButtonArgs {
+            width: ACTION_WIDTH,
+            icon: GIT_FORK,
+            label: "New Branch",
+            suffix: None,
+            enabled: toolbar_enabled,
+            busy: false,
+        },
+    ) {
         *action = ToolbarAction::NewBranch;
     }
 }
 
-fn toolbar_button(
-    ui: &mut egui::Ui,
+struct ToolbarButtonArgs<'a> {
     width: f32,
-    icon: &str,
-    label: &str,
-    suffix: Option<&str>,
-) -> bool {
+    icon: &'a str,
+    label: &'a str,
+    suffix: Option<&'a str>,
+    enabled: bool,
+    busy: bool,
+}
+
+fn toolbar_button(ui: &mut egui::Ui, args: ToolbarButtonArgs<'_>) -> bool {
     let response = ui.allocate_ui_with_layout(
-        egui::vec2(width, ACTION_HEIGHT),
+        egui::vec2(args.width, ACTION_HEIGHT),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            if args.busy {
+                ui.add_sized([args.width, 20.0], egui::Spinner::new().size(14.0));
+            } else {
+                ui.add_sized(
+                    [args.width, 20.0],
+                    IconRow {
+                        icon: args.icon,
+                        suffix: args.suffix,
+                        icon_size: 16.0,
+                    },
+                );
+            }
             ui.add_sized(
-                [width, 20.0],
-                IconRow {
-                    icon,
-                    suffix,
-                    icon_size: 16.0,
-                },
-            );
-            ui.add_sized(
-                [width, 12.0],
+                [args.width, 12.0],
                 CenteredText {
-                    text: label,
+                    text: args.label,
                     size: 10.0,
                 },
             );
         },
     );
-    let interacted = response.response.interact(egui::Sense::click());
-    if interacted.hovered() {
+    let interacted = response.response.interact(if args.enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    });
+    if args.enabled && interacted.hovered() {
         ui.painter().rect_filled(
             response.response.rect,
             4.0,
             egui::Color32::from_white_alpha(18),
         );
     }
-    interacted.clicked()
+    args.enabled && interacted.clicked()
+}
+
+struct ToolbarMenuButtonArgs<'a> {
+    width: f32,
+    icon: &'a str,
+    label: &'a str,
+    suffix: Option<&'a str>,
+    enabled: bool,
+    busy: bool,
 }
 
 fn toolbar_menu_button(
     ui: &mut egui::Ui,
-    width: f32,
-    icon: &str,
-    label: &str,
-    suffix: Option<&str>,
+    args: ToolbarMenuButtonArgs<'_>,
     add_contents: impl FnOnce(&mut egui::Ui),
 ) {
     let response = ui.allocate_ui_with_layout(
-        egui::vec2(width, ACTION_HEIGHT),
+        egui::vec2(args.width, ACTION_HEIGHT),
         egui::Layout::top_down(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            if args.busy {
+                ui.add_sized([args.width, 20.0], egui::Spinner::new().size(14.0));
+            } else {
+                ui.add_sized(
+                    [args.width, 20.0],
+                    IconRow {
+                        icon: args.icon,
+                        suffix: args.suffix,
+                        icon_size: 16.0,
+                    },
+                );
+            }
             ui.add_sized(
-                [width, 20.0],
-                IconRow {
-                    icon,
-                    suffix,
-                    icon_size: 16.0,
-                },
-            );
-            ui.add_sized(
-                [width, 12.0],
+                [args.width, 12.0],
                 CenteredText {
-                    text: label,
+                    text: args.label,
                     size: 10.0,
                 },
             );
         },
     );
 
-    let interacted = response.response.interact(egui::Sense::click());
+    let interacted = response.response.interact(if args.enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    });
     let popup_id = interacted.id.with("popup");
     let is_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
 
-    if interacted.hovered() || is_open {
+    if args.enabled && (interacted.hovered() || is_open) {
         ui.painter().rect_filled(
             response.response.rect,
             4.0,
             egui::Color32::from_white_alpha(18),
         );
+    }
+
+    if !args.enabled {
+        return;
     }
 
     egui::Popup::from_toggle_button_response(&interacted)

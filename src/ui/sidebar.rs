@@ -1,9 +1,9 @@
 use eframe::egui;
 use egui_phosphor::regular::{
-    ARROW_COUNTER_CLOCKWISE, ARROW_UP_RIGHT, BOOKMARK, CARET_DOWN, CARET_RIGHT, CHECK_CIRCLE,
-    CLOCK, DOTS_THREE_VERTICAL, EYE, FILE_TEXT, FUNNEL, GEAR_SIX, GIT_BRANCH, GIT_PULL_REQUEST,
-    GITHUB_LOGO, GLOBE, LAPTOP, LIST, MAGNIFYING_GLASS, PACKAGE, PLAY_CIRCLE, PROHIBIT, STACK, TAG,
-    TREE_VIEW, WARNING_CIRCLE,
+    ARROW_COUNTER_CLOCKWISE, ARROW_DOWN, ARROW_UP, ARROW_UP_RIGHT, BOOKMARK, CARET_DOWN,
+    CARET_RIGHT, CHECK_CIRCLE, CLOCK, CLOUD, DOTS_THREE_VERTICAL, EYE, FILE_TEXT, FUNNEL, GEAR_SIX,
+    GIT_BRANCH, GIT_PULL_REQUEST, LAPTOP, LIST, MAGNIFYING_GLASS, PACKAGE, PLAY_CIRCLE, PROHIBIT,
+    STACK, TAG, TREE_VIEW, WARNING_CIRCLE,
 };
 
 use crate::state::AppState;
@@ -15,6 +15,8 @@ const FILTER_HEIGHT: f32 = 26.0;
 use crate::ui::colors::get_branch_color;
 
 pub mod branch_dropdown;
+pub mod remote_branch_dropdown;
+pub mod remote_dropdown;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarTab {
@@ -40,6 +42,7 @@ pub struct SidebarState {
     pub search_query: String,
     pub cached_head_hash: Option<String>,
     pub cached_tracked_files: Vec<String>,
+    pub collapsed_remotes: std::collections::HashSet<String>,
 }
 
 impl Default for SidebarState {
@@ -61,6 +64,7 @@ impl Default for SidebarState {
             search_query: String::new(),
             cached_head_hash: None,
             cached_tracked_files: Vec::new(),
+            collapsed_remotes: std::collections::HashSet::new(),
         }
     }
 }
@@ -345,6 +349,37 @@ pub fn show_cached(
                                             );
 
                                             let row = row_rect(content_rect, local_y, ROW_HEIGHT);
+
+                                            let mut current_x = row.right() - 26.0;
+                                            let gray_color = egui::Color32::from_rgb(135, 135, 135);
+                                            if let Some(behind) = branch.behind {
+                                                if behind > 0 {
+                                                    let label = format!("{} {}", behind, ARROW_DOWN);
+                                                    painter_bold_text(
+                                                        ui,
+                                                        egui::pos2(current_x, row.center().y),
+                                                        &label,
+                                                        11.0,
+                                                        gray_color,
+                                                        egui::Align2::RIGHT_CENTER,
+                                                    );
+                                                    current_x -= (label.chars().count() as f32 * 6.5) + 6.0;
+                                                }
+                                            }
+                                            if let Some(ahead) = branch.ahead {
+                                                if ahead > 0 {
+                                                    let label = format!("{} {}", ahead, ARROW_UP);
+                                                    painter_bold_text(
+                                                        ui,
+                                                        egui::pos2(current_x, row.center().y),
+                                                        &label,
+                                                        11.0,
+                                                        gray_color,
+                                                        egui::Align2::RIGHT_CENTER,
+                                                    );
+                                                }
+                                            }
+
                                             let dropdown_rect = egui::Rect::from_min_max(
                                                 egui::pos2(row.right() - 22.0, row.top() + 2.0),
                                                 egui::pos2(row.right() - 4.0, row.bottom() - 2.0),
@@ -432,7 +467,7 @@ pub fn show_cached(
                                             content_rect,
                                             local_y,
                                             "Remotes",
-                                            GLOBE,
+                                            CLOUD,
                                             &mut sidebar_state.remotes_expanded,
                                             text,
                                             &mut action,
@@ -440,50 +475,217 @@ pub fn show_cached(
                                             Some(remote.len()),
                                         );
                                         local_y += ROW_HEIGHT;
-                                        for branch in &remote {
-                                            let response = paint_tree_row(
-                                                ui,
-                                                content_rect,
-                                                local_y,
-                                                1,
-                                                GITHUB_LOGO,
-                                                &branch.name,
-                                                false,
-                                                text,
-                                                muted,
-                                                None,
-                                                TrailingStyle::None,
-                                                &format!("remote_{}", branch.name),
-                                                Some(get_branch_color(
-                                                    &branch.name,
-                                                    &app_state.cached_branches,
-                                                )),
-                                                None,
-                                            );
 
-                                            if response.double_clicked() {
-                                                let local_name =
-                                                    if let Some(pos) = branch.name.find('/') {
-                                                        &branch.name[pos + 1..]
-                                                    } else {
-                                                        &branch.name
-                                                    };
-                                                let local_exists =
-                                                    local.iter().any(|b| b.name == local_name);
-                                                if local_exists {
-                                                    action = Some(SidebarAction::CheckoutBranch(
-                                                        local_name.to_string(),
-                                                    ));
-                                                } else {
-                                                    action =
-                                                        Some(SidebarAction::CheckoutRemoteBranch {
-                                                            local_name: local_name.to_string(),
-                                                            remote_name: branch.name.clone(),
-                                                        });
-                                                }
+                                        if sidebar_state.remotes_expanded {
+                                            let mut remote_groups: std::collections::BTreeMap<String, Vec<&crate::state::CachedBranch>> = std::collections::BTreeMap::new();
+                                            for branch in &remote {
+                                                let parts: Vec<&str> = branch.name.splitn(2, '/').collect();
+                                                let remote_name = if parts.len() == 2 { parts[0].to_string() } else { "other".to_string() };
+                                                remote_groups.entry(remote_name).or_default().push(*branch);
                                             }
 
-                                            local_y += ROW_HEIGHT;
+                                            for (remote_name, branches) in remote_groups {
+                                                let is_expanded = !sidebar_state.collapsed_remotes.contains(&remote_name);
+
+                                                // Look up avatar for this remote's GitHub owner
+                                                let avatar_url: Option<String> = app_state.cached_remotes.iter()
+                                                    .find(|r| r.name == remote_name)
+                                                    .and_then(|r| parse_github_owner_from_url(&r.url))
+                                                    .and_then(|owner| {
+                                                        // If the owner matches logged-in user, use their avatar_url directly
+                                                        if let Some(user) = &app_state.github_user {
+                                                            if user.login.eq_ignore_ascii_case(&owner) {
+                                                                 return Some(user.avatar_url.clone());
+                                                            }
+                                                        }
+                                                        // Fallback: check avatar_cache by owner name
+                                                        app_state.avatar_cache.get(&owner).cloned()
+                                                    });
+
+                                                let group_res = paint_remote_group_row(
+                                                    ui,
+                                                    RemoteGroupRowArgs {
+                                                        rect: content_rect,
+                                                        y: local_y,
+                                                        label: &remote_name,
+                                                        expanded: is_expanded,
+                                                        text,
+                                                        muted,
+                                                        id_salt: &remote_name,
+                                                        avatar_path_or_url: avatar_url.as_deref(),
+                                                    },
+                                                );
+
+                                                let row = row_rect(content_rect, local_y, ROW_HEIGHT);
+                                                let dropdown_rect = egui::Rect::from_min_max(
+                                                    egui::pos2(row.right() - 22.0, row.top() + 2.0),
+                                                    egui::pos2(row.right() - 4.0, row.bottom() - 2.0),
+                                                );
+
+                                                let dropdown_id = ui.make_persistent_id((
+                                                    "remote_group_dropdown_btn",
+                                                    &remote_name,
+                                                ));
+                                                let dropdown_resp = ui.interact(
+                                                    dropdown_rect,
+                                                    dropdown_id,
+                                                    egui::Sense::click(),
+                                                );
+
+                                                let popup_id: egui::Id = dropdown_id.with("popup");
+                                                let is_open =
+                                                    egui::Popup::is_id_open(ui.ctx(), popup_id);
+
+                                                if dropdown_resp.hovered() || is_open {
+                                                    ui.painter().rect_filled(
+                                                        dropdown_rect,
+                                                        4.0,
+                                                        egui::Color32::from_rgba_unmultiplied(
+                                                            255, 255, 255, 12,
+                                                        ),
+                                                    );
+                                                }
+
+                                                let icon_color = if dropdown_resp.hovered() || is_open {
+                                                    text
+                                                } else {
+                                                    muted
+                                                };
+
+                                                painter_text(
+                                                    ui,
+                                                    dropdown_rect.center(),
+                                                    DOTS_THREE_VERTICAL,
+                                                    12.0,
+                                                    icon_color,
+                                                    egui::Align2::CENTER_CENTER,
+                                                );
+
+                                                let current_branch_name = local.iter()
+                                                    .find(|b| b.is_current)
+                                                    .map(|b| b.name.as_str())
+                                                    .unwrap_or("dev");
+
+                                                remote_dropdown::show(ui, &remote_name, current_branch_name, &dropdown_resp);
+
+                                                let is_hovering_dropdown = ui.input(|i| {
+                                                    i.pointer
+                                                        .hover_pos()
+                                                        .is_some_and(|pos| dropdown_rect.contains(pos))
+                                                });
+
+                                                if group_res.clicked() && !is_hovering_dropdown {
+                                                    if is_expanded {
+                                                        sidebar_state.collapsed_remotes.insert(remote_name.clone());
+                                                    } else {
+                                                        sidebar_state.collapsed_remotes.remove(&remote_name);
+                                                    }
+                                                }
+
+                                                local_y += ROW_HEIGHT;
+
+                                                if is_expanded {
+                                                    for branch in branches {
+                                                        let display_name = if let Some(pos) = branch.name.find('/') {
+                                                            &branch.name[pos + 1..]
+                                                        } else {
+                                                            &branch.name
+                                                        };
+
+                                                        let response = paint_tree_row(
+                                                            ui,
+                                                            content_rect,
+                                                            local_y,
+                                                            2, // Level 2 indent
+                                                            GIT_BRANCH,
+                                                            display_name,
+                                                            false,
+                                                            text,
+                                                            muted,
+                                                            None,
+                                                            TrailingStyle::None,
+                                                            &format!("remote_{}", branch.name),
+                                                            Some(get_branch_color(
+                                                                &branch.name,
+                                                                &app_state.cached_branches,
+                                                            )),
+                                                            None,
+                                                        );
+
+                                                        let row = row_rect(content_rect, local_y, ROW_HEIGHT);
+                                                        let dropdown_rect = egui::Rect::from_min_max(
+                                                            egui::pos2(row.right() - 22.0, row.top() + 2.0),
+                                                            egui::pos2(row.right() - 4.0, row.bottom() - 2.0),
+                                                        );
+
+                                                        let dropdown_id = ui.make_persistent_id((
+                                                            "remote_branch_dropdown_btn",
+                                                            &branch.name,
+                                                        ));
+                                                        let dropdown_resp = ui.interact(
+                                                            dropdown_rect,
+                                                            dropdown_id,
+                                                            egui::Sense::click(),
+                                                        );
+
+                                                        let popup_id: egui::Id = dropdown_id.with("popup");
+                                                        let is_open =
+                                                            egui::Popup::is_id_open(ui.ctx(), popup_id);
+
+                                                        if dropdown_resp.hovered() || is_open {
+                                                            ui.painter().rect_filled(
+                                                                dropdown_rect,
+                                                                4.0,
+                                                                egui::Color32::from_rgba_unmultiplied(
+                                                                    255, 255, 255, 12,
+                                                                ),
+                                                            );
+                                                        }
+
+                                                        let icon_color = if dropdown_resp.hovered() || is_open {
+                                                            text
+                                                        } else {
+                                                            muted
+                                                        };
+
+                                                        painter_text(
+                                                            ui,
+                                                            dropdown_rect.center(),
+                                                            DOTS_THREE_VERTICAL,
+                                                            12.0,
+                                                            icon_color,
+                                                            egui::Align2::CENTER_CENTER,
+                                                        );
+
+                                                        remote_branch_dropdown::show(ui, branch, current_branch_name, &dropdown_resp);
+
+                                                        let is_hovering_dropdown = ui.input(|i| {
+                                                            i.pointer
+                                                                .hover_pos()
+                                                                .is_some_and(|pos| dropdown_rect.contains(pos))
+                                                        });
+
+                                                        if response.double_clicked() && !is_hovering_dropdown {
+                                                            let local_name = display_name;
+                                                            let local_exists =
+                                                                local.iter().any(|b| b.name == local_name);
+                                                            if local_exists {
+                                                                action = Some(SidebarAction::CheckoutBranch(
+                                                                    local_name.to_string(),
+                                                                ));
+                                                            } else {
+                                                                action =
+                                                                    Some(SidebarAction::CheckoutRemoteBranch {
+                                                                        local_name: local_name.to_string(),
+                                                                        remote_name: branch.name.clone(),
+                                                                    });
+                                                            }
+                                                        }
+
+                                                        local_y += ROW_HEIGHT;
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     SectionKind::Tags => {
@@ -914,7 +1116,7 @@ pub fn show_cached(
                             rect,
                             cur_bottom_y,
                             "Remotes",
-                            GLOBE,
+                            CLOUD,
                             &mut sidebar_state.remotes_expanded,
                             text,
                             &mut action,
@@ -1682,6 +1884,133 @@ fn painter_text(
 ) {
     ui.painter()
         .text(pos, align, text, egui::FontId::proportional(size), color);
+}
+
+fn painter_bold_text(
+    ui: &egui::Ui,
+    pos: egui::Pos2,
+    text: &str,
+    size: f32,
+    color: egui::Color32,
+    align: egui::Align2,
+) {
+    let rich_text = egui::RichText::new(text).strong().size(size).color(color);
+    let widget_text = egui::WidgetText::from(rich_text);
+    let galley = widget_text.into_galley(ui, None, f32::INFINITY, egui::TextStyle::Body);
+    let rect = galley.rect;
+    let offset_x = match align.x() {
+        egui::Align::Min => 0.0,
+        egui::Align::Center => rect.width() * 0.5,
+        egui::Align::Max => rect.width(),
+    };
+    let offset_y = match align.y() {
+        egui::Align::Min => 0.0,
+        egui::Align::Center => rect.height() * 0.5,
+        egui::Align::Max => rect.height(),
+    };
+    let top_left = egui::pos2(pos.x - offset_x, pos.y - offset_y);
+    ui.painter().galley(top_left, galley, color);
+}
+
+fn parse_github_owner_from_url(url: &str) -> Option<String> {
+    if url.contains("github.com") {
+        if let Some(pos) = url.find("github.com/") {
+            let path = &url[pos + "github.com/".len()..];
+            let parts: Vec<&str> = path.split('/').collect();
+            if !parts.is_empty() && !parts[0].is_empty() {
+                return Some(parts[0].to_string());
+            }
+        } else if let Some(pos) = url.find("github.com:") {
+            let path = &url[pos + "github.com:".len()..];
+            let parts: Vec<&str> = path.split('/').collect();
+            if !parts.is_empty() && !parts[0].is_empty() {
+                return Some(parts[0].to_string());
+            }
+        }
+    }
+    None
+}
+
+struct RemoteGroupRowArgs<'a> {
+    rect: egui::Rect,
+    y: f32,
+    label: &'a str,
+    expanded: bool,
+    text: egui::Color32,
+    muted: egui::Color32,
+    id_salt: &'a str,
+    avatar_path_or_url: Option<&'a str>,
+}
+
+fn paint_remote_group_row(ui: &mut egui::Ui, args: RemoteGroupRowArgs<'_>) -> egui::Response {
+    let row = row_rect(args.rect, args.y, ROW_HEIGHT);
+    let response = ui.interact(
+        row,
+        ui.make_persistent_id(("app_sidebar_remote_group", args.id_salt, args.label)),
+        egui::Sense::click(),
+    );
+
+    if response.hovered() {
+        ui.painter().rect_filled(
+            row,
+            4.0,
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8),
+        );
+    }
+
+    let left = row.left();
+    let caret = if args.expanded {
+        CARET_DOWN
+    } else {
+        CARET_RIGHT
+    };
+
+    // Caret
+    painter_text(
+        ui,
+        egui::pos2(left + 24.0, row.center().y),
+        caret,
+        10.0,
+        args.text.linear_multiply(0.6),
+        egui::Align2::CENTER_CENTER,
+    );
+
+    // Avatar or Globe Icon
+    if let Some(path_or_url) = args.avatar_path_or_url {
+        let uri = if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
+            path_or_url.to_string()
+        } else {
+            url::Url::from_file_path(path_or_url)
+                .map(|u| u.to_string())
+                .unwrap_or_else(|_| format!("file://{}", path_or_url))
+        };
+        let image_rect = egui::Rect::from_center_size(
+            egui::pos2(left + 38.0, row.center().y),
+            egui::vec2(12.0, 12.0),
+        );
+        ui.put(image_rect, egui::Image::new(uri).corner_radius(2.0));
+    } else {
+        painter_text(
+            ui,
+            egui::pos2(left + 38.0, row.center().y),
+            CLOUD,
+            12.0,
+            args.muted,
+            egui::Align2::CENTER_CENTER,
+        );
+    }
+
+    // Label
+    painter_text(
+        ui,
+        egui::pos2(left + 50.0, row.center().y),
+        args.label,
+        12.0,
+        args.text,
+        egui::Align2::LEFT_CENTER,
+    );
+
+    response
 }
 
 fn paint_gradient_rect(

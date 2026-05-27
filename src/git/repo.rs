@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::SystemTime;
 
-use git2::{Repository, Sort, StashFlags, StatusOptions};
+use git2::{
+    Cred, FetchOptions, PushOptions, RemoteCallbacks, Repository, Sort, StashFlags, StatusOptions,
+};
 
 use crate::cdv::{
     CommitDiffFile, CommitDiffFileKind, CommitDiffHunk, CommitDiffLine, CommitDiffLineKind,
@@ -581,10 +583,26 @@ impl GitRepo {
             let tip = branch.get().peel_to_commit()?;
             let is_current = head_name.as_deref() == Some(&name);
 
-            let upstream = branch
-                .upstream()
-                .ok()
+            let upstream_branch = branch.upstream().ok();
+            let upstream = upstream_branch
+                .as_ref()
                 .map(|b| b.name().ok().flatten().unwrap_or("unknown").to_string());
+
+            let mut ahead = None;
+            let mut behind = None;
+            if let Some(ref ub) = upstream_branch {
+                if let (Ok(local_commit), Ok(upstream_commit)) =
+                    (branch.get().peel_to_commit(), ub.get().peel_to_commit())
+                {
+                    if let Ok((a, b)) = self
+                        .repo
+                        .graph_ahead_behind(local_commit.id(), upstream_commit.id())
+                    {
+                        ahead = Some(a);
+                        behind = Some(b);
+                    }
+                }
+            }
 
             branches.push(Branch {
                 name,
@@ -592,6 +610,8 @@ impl GitRepo {
                 is_remote: false,
                 upstream,
                 tip_hash: tip.id().to_string()[..7].to_string(),
+                ahead,
+                behind,
             });
         }
 
@@ -606,6 +626,8 @@ impl GitRepo {
                 is_remote: true,
                 upstream: None,
                 tip_hash: tip.id().to_string()[..7].to_string(),
+                ahead: None,
+                behind: None,
             });
         }
 
@@ -1245,12 +1267,13 @@ impl GitRepo {
     pub fn fetch(&self) -> Result<(), GitError> {
         let (remote_name, remote_branch, has_upstream) = self.resolve_upstream_or_fallback()?;
         let mut remote = self.repo.find_remote(&remote_name)?;
+        let mut fo = self.remote_fetch_options()?;
         if has_upstream {
             let refspec =
                 format!("refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
-            remote.fetch(&[&refspec], None, None)?;
+            remote.fetch(&[&refspec], Some(&mut fo), None)?;
         } else {
-            remote.fetch(&[] as &[&str], None, None)?;
+            remote.fetch(&[] as &[&str], Some(&mut fo), None)?;
         }
         Ok(())
     }
@@ -1265,7 +1288,8 @@ impl GitRepo {
         let mut remote = self.repo.find_remote(&remote_name)?;
         let refspec =
             format!("refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
-        remote.fetch(&[&refspec], None, None)?;
+        let mut fo = self.remote_fetch_options()?;
+        remote.fetch(&[&refspec], Some(&mut fo), None)?;
         let remote_ref_name = format!("refs/remotes/{remote_name}/{remote_branch}");
         let remote_ref = self.repo.find_reference(&remote_ref_name)?;
         let remote_commit = remote_ref.peel_to_commit()?;
@@ -1313,8 +1337,79 @@ impl GitRepo {
         let (remote_name, remote_branch, _has_upstream) = self.resolve_upstream_or_fallback()?;
         let refspec = format!("refs/heads/{}:refs/heads/{}", branch_name, remote_branch);
         let mut remote = self.repo.find_remote(&remote_name)?;
-        remote.push(&[&refspec], None)?;
+        let mut po = self.remote_push_options()?;
+        remote.push(&[&refspec], Some(&mut po))?;
         Ok(())
+    }
+
+    fn remote_callbacks(&self) -> Result<RemoteCallbacks<'static>, GitError> {
+        let mut callbacks = RemoteCallbacks::new();
+
+        callbacks.credentials(move |url, username_from_url, allowed_types| {
+            if allowed_types.is_username() {
+                return Cred::username(username_from_url.unwrap_or("git"));
+            }
+
+            if allowed_types.is_ssh_key()
+                || allowed_types.is_ssh_memory()
+                || allowed_types.is_ssh_custom()
+            {
+                let username = username_from_url.unwrap_or("git");
+                if let Ok(cred) = git_credential_helper(url, Some(username)) {
+                    return Ok(cred);
+                }
+                if let Ok(cred) = Cred::ssh_key_from_agent(username) {
+                    return Ok(cred);
+                }
+
+                if let Some(home) = std::env::var_os("HOME") {
+                    let ssh_dir = std::path::Path::new(&home).join(".ssh");
+                    let key_candidates = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"];
+                    for candidate in key_candidates {
+                        let private_key = ssh_dir.join(candidate);
+                        let public_key = ssh_dir.join(format!("{candidate}.pub"));
+                        if private_key.exists() {
+                            let public_key_opt =
+                                public_key.exists().then_some(public_key.as_path());
+                            return Cred::ssh_key(username, public_key_opt, &private_key, None);
+                        }
+                    }
+                }
+            }
+
+            if allowed_types.is_user_pass_plaintext() {
+                if let Ok(cred) = git_credential_helper(url, username_from_url) {
+                    return Ok(cred);
+                }
+            }
+
+            Err(git2::Error::from_str(
+                "No usable Git credentials found; load your SSH key into ssh-agent or use an unencrypted key",
+            ))
+        });
+
+        callbacks.transfer_progress(|stats| {
+            tracing::debug!(
+                received_objects = stats.received_objects(),
+                total_objects = stats.total_objects(),
+                "Git transfer progress"
+            );
+            true
+        });
+
+        Ok(callbacks)
+    }
+
+    fn remote_fetch_options(&self) -> Result<FetchOptions<'static>, GitError> {
+        let mut options = FetchOptions::new();
+        options.remote_callbacks(self.remote_callbacks()?);
+        Ok(options)
+    }
+
+    fn remote_push_options(&self) -> Result<PushOptions<'static>, GitError> {
+        let mut options = PushOptions::new();
+        options.remote_callbacks(self.remote_callbacks()?);
+        Ok(options)
     }
 
     pub fn signature(&self) -> Result<git2::Signature<'static>, GitError> {
@@ -1543,6 +1638,68 @@ fn parse_tag_name_version(tag: &str) -> (u64, u64, u64) {
     let minor = parts.next().map(parse_part).unwrap_or(0);
     let patch = parts.next().map(parse_part).unwrap_or(0);
     (major, minor, patch)
+}
+
+fn git_credential_helper(url_str: &str, username: Option<&str>) -> Result<Cred, git2::Error> {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .args(["credential", "fill"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| git2::Error::from_str(&format!("failed to spawn git credential: {}", e)))?;
+
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        if let Ok(url_parsed) = url::Url::parse(url_str) {
+            writeln!(stdin, "protocol={}", url_parsed.scheme()).ok();
+            writeln!(stdin, "host={}", url_parsed.host_str().unwrap_or("")).ok();
+            let path = url_parsed.path().trim_start_matches('/');
+            if !path.is_empty() {
+                writeln!(stdin, "path={}", path).ok();
+            }
+            if let Some(user) = username {
+                writeln!(stdin, "username={}", user).ok();
+            } else if !url_parsed.username().is_empty() {
+                writeln!(stdin, "username={}", url_parsed.username()).ok();
+            }
+        } else {
+            writeln!(stdin, "url={}", url_str).ok();
+            if let Some(user) = username {
+                writeln!(stdin, "username={}", user).ok();
+            }
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| git2::Error::from_str(&format!("failed to wait for git credential: {}", e)))?;
+
+    if !output.status.success() {
+        return Err(git2::Error::from_str("git credential helper failed"));
+    }
+
+    let mut out_username = String::new();
+    let mut out_password = String::new();
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    for line in stdout_str.lines() {
+        if let Some(val) = line.strip_prefix("username=") {
+            out_username = val.to_string();
+        } else if let Some(val) = line.strip_prefix("password=") {
+            out_password = val.to_string();
+        }
+    }
+
+    if !out_password.is_empty() {
+        let user = if out_username.is_empty() {
+            username.unwrap_or("git").to_string()
+        } else {
+            out_username
+        };
+        Cred::userpass_plaintext(&user, &out_password)
+    } else {
+        Err(git2::Error::from_str("no credentials returned from helper"))
+    }
 }
 
 #[cfg(test)]

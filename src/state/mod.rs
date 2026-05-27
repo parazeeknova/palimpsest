@@ -321,6 +321,8 @@ pub struct CachedBranch {
     pub is_remote: bool,
     pub upstream: Option<String>,
     pub tip_hash: String,
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -700,6 +702,8 @@ impl AppState {
                 is_remote: b.is_remote,
                 upstream: b.upstream.clone(),
                 tip_hash: b.tip_hash.clone(),
+                ahead: b.ahead,
+                behind: b.behind,
             })
             .collect();
         self

@@ -555,6 +555,13 @@ pub fn spawn_repo_tracker(
 
         let mut dirty_slices = DirtySlices::default();
 
+        let needs_refs_revalidation = current_local.branches.iter().any(|b| {
+            !b.is_remote && b.upstream.is_some() && b.ahead.is_none() && b.behind.is_none()
+        });
+        if needs_refs_revalidation {
+            dirty_slices.refs = true;
+        }
+
         // Compute initial fingerprint check
         let current_fps = crate::git::cache::compute_repo_fingerprints(&path);
         let mut stored_fps = crate::git::cache::load_fingerprints(&path).unwrap_or(None);
