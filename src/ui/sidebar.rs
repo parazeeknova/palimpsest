@@ -26,6 +26,7 @@ pub struct SidebarState {
     pub branches_expanded: bool,
     pub remotes_expanded: bool,
     pub tags_expanded: bool,
+    pub tags_show_all: bool,
     pub stashes_expanded: bool,
     pub prs_expanded: bool,
     pub runs_expanded: bool,
@@ -44,6 +45,7 @@ impl Default for SidebarState {
             branches_expanded: true,
             remotes_expanded: false,
             tags_expanded: false,
+            tags_show_all: false,
             stashes_expanded: false,
             prs_expanded: false,
             runs_expanded: false,
@@ -215,7 +217,18 @@ pub fn show_cached(
                 let count = match section {
                     SectionKind::Local => local.len(),
                     SectionKind::Remotes => remote.len(),
-                    SectionKind::Tags => app_state.cached_tags.len(),
+                    SectionKind::Tags => {
+                        let total = app_state.cached_tags.len();
+                        if total > 5 {
+                            if sidebar_state.tags_show_all {
+                                total + 1
+                            } else {
+                                5 + 1
+                            }
+                        } else {
+                            total
+                        }
+                    }
                     SectionKind::Stashes => app_state.cached_stashes.len(),
                     SectionKind::PRs => app_state.github_pull_requests.len(),
                     SectionKind::Runs => app_state.github_action_runs.len(),
@@ -371,13 +384,22 @@ pub fn show_cached(
                                             false,
                                         );
                                         local_y += ROW_HEIGHT;
-                                        for tag in &app_state.cached_tags {
+
+                                        let total_tags = app_state.cached_tags.len();
+                                        let tags_to_show =
+                                            if total_tags > 5 && !sidebar_state.tags_show_all {
+                                                &app_state.cached_tags[..5]
+                                            } else {
+                                                &app_state.cached_tags[..]
+                                            };
+
+                                        for tag in tags_to_show {
                                             paint_tree_row(
                                                 ui,
                                                 content_rect,
                                                 local_y,
                                                 1,
-                                                FUNNEL,
+                                                TAG,
                                                 &tag.name,
                                                 false,
                                                 text,
@@ -388,6 +410,42 @@ pub fn show_cached(
                                                 None,
                                                 None,
                                             );
+                                            local_y += ROW_HEIGHT;
+                                        }
+
+                                        if total_tags > 5 {
+                                            let button_row =
+                                                row_rect(content_rect, local_y, ROW_HEIGHT);
+                                            let btn_label = if sidebar_state.tags_show_all {
+                                                "Show Less"
+                                            } else {
+                                                "Show More"
+                                            };
+
+                                            ui.scope_builder(
+                                                egui::UiBuilder::new().max_rect(button_row),
+                                                |ui| {
+                                                    ui.centered_and_justified(|ui| {
+                                                        let btn = ui.add(
+                                                            egui::Button::new(
+                                                                egui::RichText::new(btn_label)
+                                                                    .font(
+                                                                        egui::FontId::proportional(
+                                                                            11.0,
+                                                                        ),
+                                                                    )
+                                                                    .color(muted),
+                                                            )
+                                                            .frame(false),
+                                                        );
+                                                        if btn.clicked() {
+                                                            sidebar_state.tags_show_all =
+                                                                !sidebar_state.tags_show_all;
+                                                        }
+                                                    });
+                                                },
+                                            );
+
                                             local_y += ROW_HEIGHT;
                                         }
                                     }

@@ -625,7 +625,7 @@ impl GitRepo {
 
     pub fn tags(&self) -> Result<Vec<Tag>, GitError> {
         let tags = self.repo.tag_names(None)?;
-        let result: Vec<Tag> = tags
+        let mut result: Vec<Tag> = tags
             .iter()
             .filter_map(|r| r.ok().flatten())
             .map(|name| {
@@ -659,6 +659,12 @@ impl GitRepo {
                 })
             })
             .collect::<Result<Vec<_>, git2::Error>>()?;
+
+        result.sort_by(|a, b| {
+            let va = parse_tag_name_version(&a.name);
+            let vb = parse_tag_name_version(&b.name);
+            vb.cmp(&va)
+        });
 
         tracing::debug!(count = result.len(), "Tags fetched");
         Ok(result)
