@@ -299,6 +299,7 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
+                                            Some(local.len()),
                                         );
                                         local_y += ROW_HEIGHT;
                                         for branch in &local {
@@ -359,6 +360,7 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             is_fetching,
+                                            Some(remote.len()),
                                         );
                                         local_y += ROW_HEIGHT;
                                         for branch in &remote {
@@ -395,6 +397,7 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
+                                            Some(app_state.cached_tags.len()),
                                         );
                                         local_y += ROW_HEIGHT;
 
@@ -467,6 +470,7 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
+                                            Some(app_state.cached_stashes.len()),
                                         );
                                         local_y += ROW_HEIGHT;
                                         for (idx, stash) in
@@ -520,6 +524,7 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
+                                            Some(app_state.github_pull_requests.len()),
                                         );
                                         local_y += ROW_HEIGHT;
                                         for pr in &app_state.github_pull_requests {
@@ -559,6 +564,7 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             app_state.github_loading,
+                                            Some(app_state.github_action_runs.len()),
                                         );
                                         local_y += ROW_HEIGHT;
                                         for run in &app_state.github_action_runs {
@@ -629,6 +635,7 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
+                                            Some(app_state.github_releases.len()),
                                         );
                                         local_y += ROW_HEIGHT;
 
@@ -709,6 +716,7 @@ pub fn show_cached(
                                             text,
                                             &mut action,
                                             false,
+                                            Some(app_state.github_packages.len()),
                                         );
                                         local_y += ROW_HEIGHT;
                                         for pkg in &app_state.github_packages {
@@ -757,6 +765,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
+                            Some(local.len()),
                         );
                     }
                     SectionKind::Remotes => {
@@ -771,6 +780,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             is_fetching,
+                            Some(remote.len()),
                         );
                     }
                     SectionKind::Tags => {
@@ -784,6 +794,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
+                            Some(app_state.cached_tags.len()),
                         );
                     }
                     SectionKind::Stashes => {
@@ -797,6 +808,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
+                            Some(app_state.cached_stashes.len()),
                         );
                     }
                     SectionKind::PRs => {
@@ -810,6 +822,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
+                            Some(app_state.github_pull_requests.len()),
                         );
                     }
                     SectionKind::Runs => {
@@ -823,6 +836,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             app_state.github_loading,
+                            Some(app_state.github_action_runs.len()),
                         );
                     }
                     SectionKind::Releases => {
@@ -836,6 +850,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
+                            Some(app_state.github_releases.len()),
                         );
                     }
                     SectionKind::Packages => {
@@ -849,6 +864,7 @@ pub fn show_cached(
                             text,
                             &mut action,
                             false,
+                            Some(app_state.github_packages.len()),
                         );
                     }
                 }
@@ -1241,6 +1257,7 @@ fn paint_section(
     text: egui::Color32,
     extra_action: &mut Option<SidebarAction>,
     is_fetching: bool,
+    count: Option<usize>,
 ) {
     let row = row_rect(rect, y, ROW_HEIGHT);
     let caret = if *expanded { CARET_DOWN } else { CARET_RIGHT };
@@ -1291,6 +1308,45 @@ fn paint_section(
         text,
         egui::Align2::LEFT_CENTER,
     );
+
+    // Muted premium count capsule badge
+    if let Some(count) = count {
+        let count_str = count.to_string();
+        let font_id = egui::FontId::proportional(10.0);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(count_str.clone(), font_id.clone(), text);
+        let text_width = galley.size().x;
+
+        let right_margin = if label == "Remotes" || label == "Actions" {
+            44.0
+        } else {
+            24.0
+        };
+
+        let badge_w = text_width + 8.0;
+        let badge_h = 14.0;
+        let badge_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                row.right() - right_margin - badge_w,
+                row.center().y - badge_h * 0.5,
+            ),
+            egui::vec2(badge_w, badge_h),
+        );
+
+        let badge_bg = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 12);
+        ui.painter().rect_filled(badge_rect, 7.0, badge_bg);
+
+        let muted_color = text.linear_multiply(0.5);
+        painter_text(
+            ui,
+            badge_rect.center(),
+            &count_str,
+            10.0,
+            muted_color,
+            egui::Align2::CENTER_CENTER,
+        );
+    }
 
     // Fetch spinner / Refetch button for Remotes and Actions
     if label == "Remotes" || label == "Actions" {
