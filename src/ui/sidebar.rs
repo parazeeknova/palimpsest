@@ -148,9 +148,45 @@ pub fn show_cached(
 
     match sidebar_state.current_tab {
         SidebarTab::Repository => {
-            paint_nav_row(ui, rect, y, FILE_TEXT, "Changes", false, text, selected);
+            // Changes row — show file count, +adds, -dels from cached_status
+            let changes_trailing = if let Some(ref status) = app_state.cached_status {
+                let files = status.files_changed;
+                let additions = status.additions;
+                let deletions = status.deletions;
+                NavRowTrailing::DiffStats {
+                    files,
+                    additions,
+                    deletions,
+                }
+            } else {
+                NavRowTrailing::None
+            };
+            paint_nav_row(
+                ui,
+                rect,
+                y,
+                FILE_TEXT,
+                "Changes",
+                false,
+                text,
+                selected,
+                changes_trailing,
+            );
             y += ROW_HEIGHT;
-            paint_nav_row(ui, rect, y, LIST, "All Commits", true, text, selected);
+
+            // All Commits row — show total commit count
+            let commits_trailing = NavRowTrailing::Count(app_state.cached_commits.len());
+            paint_nav_row(
+                ui,
+                rect,
+                y,
+                LIST,
+                "All Commits",
+                true,
+                text,
+                selected,
+                commits_trailing,
+            );
             y += ROW_HEIGHT;
 
             let query = sidebar_state.filter_query.to_lowercase();
@@ -1600,27 +1636,125 @@ fn paint_nav_row(
     is_selected: bool,
     text: egui::Color32,
     selected: egui::Color32,
+    trailing: NavRowTrailing,
 ) {
     let row = row_rect(rect, y, ROW_HEIGHT);
     if is_selected {
         ui.painter().rect_filled(row, 0.0, selected);
     }
+    // Icon — aligned with section headers (24px from left, 13pt)
     painter_text(
         ui,
         egui::pos2(row.left() + 24.0, row.center().y),
         icon,
-        16.0,
-        text,
+        13.0,
+        text.linear_multiply(0.8),
         egui::Align2::CENTER_CENTER,
     );
+    // Label — aligned with section headers (38px from left, 12pt)
     painter_text(
         ui,
-        egui::pos2(row.left() + 48.0, row.center().y),
+        egui::pos2(row.left() + 38.0, row.center().y),
         label,
-        14.0,
+        12.0,
         text,
         egui::Align2::LEFT_CENTER,
     );
+
+    // Trailing stats on the right
+    let muted = text.linear_multiply(0.45);
+    let green = egui::Color32::from_rgb(39, 174, 96);
+    let red = egui::Color32::from_rgb(231, 76, 60);
+
+    match trailing {
+        NavRowTrailing::None => {}
+        NavRowTrailing::DiffStats {
+            files,
+            additions,
+            deletions,
+        } => {
+            if files > 0 {
+                let mut cursor_x = row.right() - 8.0;
+                // -deletions (red)
+                if deletions > 0 {
+                    let del_str = format!("-{}", deletions);
+                    painter_bold_text(
+                        ui,
+                        egui::pos2(cursor_x, row.center().y),
+                        &del_str,
+                        9.5,
+                        red.linear_multiply(0.8),
+                        egui::Align2::RIGHT_CENTER,
+                    );
+                    let font_id = egui::FontId::proportional(9.5);
+                    let galley = ui.painter().layout_no_wrap(del_str, font_id, red);
+                    cursor_x -= galley.size().x + 5.0;
+                }
+                // +additions (green)
+                if additions > 0 {
+                    let add_str = format!("+{}", additions);
+                    painter_bold_text(
+                        ui,
+                        egui::pos2(cursor_x, row.center().y),
+                        &add_str,
+                        9.5,
+                        green.linear_multiply(0.8),
+                        egui::Align2::RIGHT_CENTER,
+                    );
+                    let font_id = egui::FontId::proportional(9.5);
+                    let galley = ui.painter().layout_no_wrap(add_str, font_id, green);
+                    cursor_x -= galley.size().x + 5.0;
+                }
+                // file count
+                let file_str = files.to_string();
+                painter_text(
+                    ui,
+                    egui::pos2(cursor_x, row.center().y),
+                    &file_str,
+                    9.5,
+                    muted,
+                    egui::Align2::RIGHT_CENTER,
+                );
+            }
+        }
+        NavRowTrailing::Count(count) => {
+            if count > 0 {
+                let count_str = count.to_string();
+                // Capsule badge (matching paint_section style)
+                let font_id = egui::FontId::proportional(9.5);
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(count_str.clone(), font_id, text);
+                let text_width = galley.size().x;
+                let badge_w = text_width + 8.0;
+                let badge_h = 14.0;
+                let badge_rect = egui::Rect::from_min_size(
+                    egui::pos2(row.right() - 8.0 - badge_w, row.center().y - badge_h * 0.5),
+                    egui::vec2(badge_w, badge_h),
+                );
+                let badge_bg = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 12);
+                ui.painter().rect_filled(badge_rect, 7.0, badge_bg);
+                painter_text(
+                    ui,
+                    badge_rect.center(),
+                    &count_str,
+                    9.5,
+                    muted,
+                    egui::Align2::CENTER_CENTER,
+                );
+            }
+        }
+    }
+}
+
+enum NavRowTrailing {
+    None,
+    DiffStats {
+        files: usize,
+        additions: usize,
+        deletions: usize,
+    },
+    Count(usize),
 }
 
 fn paint_mode_bar(
