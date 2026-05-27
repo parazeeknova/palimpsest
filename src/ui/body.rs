@@ -406,10 +406,41 @@ impl GraphData {
         commit: &CachedCommit,
         branches: &[CachedBranch],
     ) -> egui::Color32 {
-        let branch_name = branches
+        let matching_branches: Vec<&CachedBranch> = branches
             .iter()
-            .find(|b| b.tip_hash == commit.hash || b.tip_hash == commit.short_hash)
-            .map(|b| b.name.as_str());
+            .filter(|b| b.tip_hash == commit.hash || b.tip_hash == commit.short_hash)
+            .collect();
+
+        let best_branch = matching_branches.iter().min_by_key(|b| {
+            let base_name = b.name.split('/').next_back().unwrap_or(b.name.as_str());
+
+            // Factor 1: Does this base name point to any other commit?
+            let has_other_commit = branches.iter().any(|other| {
+                let other_base = other
+                    .name
+                    .split('/')
+                    .next_back()
+                    .unwrap_or(other.name.as_str());
+                other_base == base_name
+                    && other.tip_hash != commit.hash
+                    && other.tip_hash != commit.short_hash
+            });
+            let score_factor_1: i32 = if has_other_commit { 1 } else { 0 };
+
+            // Factor 2: Is it a primary branch (main/master/trunk)?
+            let is_primary = base_name == "main" || base_name == "master" || base_name == "trunk";
+            let score_factor_2: i32 = if is_primary { -10 } else { 0 };
+
+            // Factor 3: Is it local?
+            let score_factor_3: i32 = if !b.is_remote { -2 } else { 0 };
+
+            // Factor 4: Is it current/checked out?
+            let score_factor_4: i32 = if b.is_current { -1 } else { 0 };
+
+            score_factor_1 + score_factor_2 + score_factor_3 + score_factor_4
+        });
+
+        let branch_name = best_branch.copied().map(|b| b.name.as_str());
 
         if let Some(name) = branch_name {
             let color = crate::ui::colors::get_branch_color(name, branches);
@@ -1777,6 +1808,9 @@ fn paint_ref_badges(
         refs_by_row.entry(row).or_default().push(badge.clone());
     }
 
+    // Deferred chips from the hovered/expanded row so they paint on top of all others.
+    let mut deferred_chips: Vec<(RefBadge, egui::Rect)> = Vec::new();
+
     for (row_idx, mut badges) in refs_by_row {
         let row = row_rect(content_rect, row_idx, has_top_row, ROW_HEIGHT);
         let refs_rect = row.intersect(columns.refs).shrink2(egui::vec2(6.0, 4.0));
@@ -1835,18 +1869,45 @@ fn paint_ref_badges(
         let mut visible_chips = vec![(primary_badge.clone(), primary_rect)];
 
         if is_hovered && badges.len() > 1 {
-            let mut stack_top = primary_rect.top() - 2.0;
-            for badge in badges.iter().skip(1).cloned() {
-                let width = chip_width_for_badge(ui, &badge, refs_rect.width());
-                stack_top -= chip_height + 2.0;
-                visible_chips.push((
-                    badge,
-                    egui::Rect::from_min_size(
-                        egui::pos2(refs_rect.left(), stack_top),
-                        egui::vec2(width, chip_height),
-                    ),
-                ));
+            // For the topmost commit row, expand badges downward to avoid
+            // clipping above the visible area; otherwise expand upward.
+            let expand_down = row_idx == 0;
+            if expand_down {
+                let mut stack_bottom = primary_rect.bottom() + 2.0;
+                for badge in badges.iter().skip(1).cloned() {
+                    let width = chip_width_for_badge(ui, &badge, refs_rect.width());
+                    visible_chips.push((
+                        badge,
+                        egui::Rect::from_min_size(
+                            egui::pos2(refs_rect.left(), stack_bottom),
+                            egui::vec2(width, chip_height),
+                        ),
+                    ));
+                    stack_bottom += chip_height + 2.0;
+                }
+            } else {
+                let mut stack_top = primary_rect.top() - 2.0;
+                for badge in badges.iter().skip(1).cloned() {
+                    let width = chip_width_for_badge(ui, &badge, refs_rect.width());
+                    stack_top -= chip_height + 2.0;
+                    visible_chips.push((
+                        badge,
+                        egui::Rect::from_min_size(
+                            egui::pos2(refs_rect.left(), stack_top),
+                            egui::vec2(width, chip_height),
+                        ),
+                    ));
+                }
             }
+
+            // Defer expanded chips so they paint on top of all other rows.
+            if let Some((badge, chip_rect)) = visible_chips.first() {
+                if badge.connect_to_graph {
+                    paint_ref_connector(ui, columns.graph, *chip_rect, badge, graph_data);
+                }
+            }
+            deferred_chips.extend(visible_chips);
+            continue;
         }
 
         if let Some((badge, chip_rect)) = visible_chips.first() {
@@ -1889,6 +1950,11 @@ fn paint_ref_badges(
                 egui::Align2::CENTER_CENTER,
             );
         }
+    }
+
+    // Paint deferred (hovered/expanded) chips last so they render on top.
+    for (badge, chip_rect) in deferred_chips.into_iter().rev() {
+        paint_ref_chip(ui, chip_rect, &badge, color_for_ref(&badge, graph_data));
     }
 }
 

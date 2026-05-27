@@ -463,6 +463,14 @@ pub struct GitHubActionRun {
     pub conclusion: Option<String>,
     pub html_url: String,
     pub head_branch: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub run_number: u32,
+    #[serde(default)]
+    pub actor_login: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

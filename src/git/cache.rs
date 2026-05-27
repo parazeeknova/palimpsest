@@ -1934,6 +1934,10 @@ mod tests {
                     conclusion: Some("success".to_string()),
                     html_url: "runurl".to_string(),
                     head_branch: "feature".to_string(),
+                    created_at: "2024-01-01T00:00:00Z".to_string(),
+                    updated_at: "2024-01-01T00:05:00Z".to_string(),
+                    run_number: 16,
+                    actor_login: "user".to_string(),
                 }],
                 releases: vec![GitHubRelease {
                     tag_name: "v1.0.0".to_string(),

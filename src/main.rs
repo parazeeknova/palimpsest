@@ -74,6 +74,9 @@ struct PalimpsestApp {
     search_query: String,
     debug_open: bool,
     show_command_palette: bool,
+    quick_launch_busy: Option<QuickLaunchAction>,
+    quick_launch_tx: Sender<QuickLaunchAction>,
+    quick_launch_rx: Receiver<QuickLaunchAction>,
     git_repo: Option<GitRepo>,
     body_state: body::State,
     commit_panel_state: commit_panel::State,
@@ -178,6 +181,7 @@ impl PalimpsestApp {
         tracing::info!("Application initialized");
 
         let (repo_live_tx, repo_live_rx) = mpsc::channel();
+        let (quick_launch_tx, quick_launch_rx) = mpsc::channel();
 
         let mut app = Self {
             store,
@@ -186,6 +190,9 @@ impl PalimpsestApp {
             search_query: String::new(),
             debug_open: false,
             show_command_palette: false,
+            quick_launch_busy: None,
+            quick_launch_tx,
+            quick_launch_rx,
             git_repo: None,
             body_state: body::State::default(),
             commit_panel_state: commit_panel::State::default(),
@@ -409,6 +416,18 @@ impl PalimpsestApp {
                         });
                         self.store
                             .dispatch(AppAction::SetGitHubError(snapshot.github_error.clone()));
+                        changed = true;
+                    }
+                }
+                RepoLiveEvent::RemoteSyncCompleted { path, generation } => {
+                    let Some(entry) = self.repo_live_states.get_mut(&path) else {
+                        continue;
+                    };
+                    if entry.generation != generation {
+                        continue;
+                    }
+                    if self.store.get_state().current_repo.as_deref() == Some(&path) {
+                        self.store.dispatch(AppAction::SetGitHubLoading(false));
                         changed = true;
                     }
                 }
@@ -702,6 +721,19 @@ impl PalimpsestApp {
         }
     }
 
+    fn finish_quick_launch(&mut self) {
+        self.quick_launch_busy = None;
+    }
+
+    fn process_quick_launch_updates(&mut self) {
+        while let Ok(action) = self.quick_launch_rx.try_recv() {
+            if self.quick_launch_busy.as_ref() == Some(&action) {
+                tracing::info!(?action, "Quick launch action completed");
+                self.finish_quick_launch();
+            }
+        }
+    }
+
     fn handle_commit_action(&mut self, action: CommitAction) {
         let Some(repo) = &self.git_repo else {
             return;
@@ -776,7 +808,7 @@ impl PalimpsestApp {
             .dispatch(AppAction::SetRepoError(Some(msg.to_string())));
 
         let ctx = ctx.clone();
-        self.run_background_git_job(ctx, move |repo| match action {
+        self.run_background_git_job(ctx, None, move |repo| match action {
             StashAction::Save(msg) => repo.stash_save(msg.as_deref()),
             StashAction::Pop(idx) => repo.stash_pop(idx),
             StashAction::Apply(idx) => repo.stash_apply(idx),
@@ -801,7 +833,7 @@ impl PalimpsestApp {
             .dispatch(AppAction::SetRepoError(Some(msg.to_string())));
 
         let ctx = ctx.clone();
-        self.run_background_git_job(ctx, move |repo| match action {
+        self.run_background_git_job(ctx, None, move |repo| match action {
             BranchAction::Create(name) => repo.create_branch(&name),
             BranchAction::Checkout(name) => repo.checkout_branch(&name),
             BranchAction::Delete(name) => repo.delete_branch(&name),
@@ -828,22 +860,54 @@ impl PalimpsestApp {
             QuickLaunchAction::OpenLogs => {
                 self.debug_open = true;
             }
+            QuickLaunchAction::NextTab => {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let next_index = (index + 1) % state.open_tabs.len();
+                        self.activate_tab(next_index);
+                    }
+                }
+            }
+            QuickLaunchAction::PreviousTab => {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let prev_index =
+                            (index + state.open_tabs.len() - 1) % state.open_tabs.len();
+                        self.activate_tab(prev_index);
+                    }
+                }
+            }
             QuickLaunchAction::Fetch => {
+                tracing::info!("Quick launch: fetch");
+                self.quick_launch_busy = Some(QuickLaunchAction::Fetch);
                 self.store
                     .dispatch(AppAction::SetRepoError(Some("Fetching...".to_string())));
-                self.run_background_git_job(ctx.clone(), |repo| repo.fetch());
+                self.run_background_git_job(ctx.clone(), Some(QuickLaunchAction::Fetch), |repo| {
+                    repo.fetch()
+                });
             }
             QuickLaunchAction::Pull => {
+                tracing::info!("Quick launch: pull");
+                self.quick_launch_busy = Some(QuickLaunchAction::Pull);
                 self.store
                     .dispatch(AppAction::SetRepoError(Some("Pulling...".to_string())));
-                self.run_background_git_job(ctx.clone(), |repo| repo.pull());
+                self.run_background_git_job(ctx.clone(), Some(QuickLaunchAction::Pull), |repo| {
+                    repo.pull()
+                });
             }
             QuickLaunchAction::Push => {
+                tracing::info!("Quick launch: push");
+                self.quick_launch_busy = Some(QuickLaunchAction::Push);
                 self.store
                     .dispatch(AppAction::SetRepoError(Some("Pushing...".to_string())));
-                self.run_background_git_job(ctx.clone(), |repo| repo.push());
+                self.run_background_git_job(ctx.clone(), Some(QuickLaunchAction::Push), |repo| {
+                    repo.push()
+                });
             }
             QuickLaunchAction::StageAll => {
+                tracing::info!("Quick launch: stage all");
                 if let Some(repo) = &self.git_repo {
                     match repo.stage_all() {
                         Ok(()) => self.refresh_git_data(),
@@ -851,7 +915,17 @@ impl PalimpsestApp {
                     }
                 }
             }
+            QuickLaunchAction::UnstageAll => {
+                tracing::info!("Quick launch: unstage all");
+                if let Some(repo) = &self.git_repo {
+                    match repo.unstage_all() {
+                        Ok(()) => self.refresh_git_data(),
+                        Err(e) => tracing::error!(error = %e, "Failed to unstage all"),
+                    }
+                }
+            }
             QuickLaunchAction::DiscardAll => {
+                tracing::info!("Quick launch: discard all");
                 if let Some(repo) = &self.git_repo {
                     match repo.discard_all() {
                         Ok(()) => self.refresh_git_data(),
@@ -860,17 +934,58 @@ impl PalimpsestApp {
                 }
             }
             QuickLaunchAction::CreateBranch => {
+                tracing::info!("Quick launch: create branch");
                 self.show_create_branch_dialog = true;
                 self.new_branch_name.clear();
+            }
+            QuickLaunchAction::CreateTag => {
+                tracing::info!("Quick launch: create tag");
+                self.show_create_tag_dialog = true;
+                self.new_tag_name.clear();
+            }
+            QuickLaunchAction::SaveStash => {
+                tracing::info!("Quick launch: save stash");
+                self.show_save_stash_dialog = true;
+                self.new_stash_message.clear();
+            }
+            QuickLaunchAction::CheckoutBranch(name) => {
+                tracing::info!(branch = %name, "Quick launch: checkout branch");
+                self.handle_branch_action(BranchAction::Checkout(name), ctx);
+            }
+            QuickLaunchAction::DeleteBranch(name) => {
+                tracing::info!(branch = %name, "Quick launch: delete branch");
+                self.handle_branch_action(BranchAction::Delete(name), ctx);
+            }
+            QuickLaunchAction::ApplyStash(idx) => {
+                tracing::info!(index = idx, "Quick launch: apply stash");
+                self.handle_stash_action(StashAction::Apply(idx), ctx);
+            }
+            QuickLaunchAction::PopStash(idx) => {
+                tracing::info!(index = idx, "Quick launch: pop stash");
+                self.handle_stash_action(StashAction::Pop(idx), ctx);
+            }
+            QuickLaunchAction::DropStash(idx) => {
+                tracing::info!(index = idx, "Quick launch: drop stash");
+                self.handle_stash_action(StashAction::Drop(idx), ctx);
+            }
+            QuickLaunchAction::Refresh => {
+                tracing::info!("Quick launch: refresh");
+                self.refresh_git_data();
+                self.trigger_tracker_refresh();
             }
         }
     }
 
-    fn run_background_git_job<F>(&self, ctx: egui::Context, f: F)
-    where
+    fn run_background_git_job<F>(
+        &self,
+        ctx: egui::Context,
+        completion: Option<QuickLaunchAction>,
+        f: F,
+    ) where
         F: FnOnce(&GitRepo) -> Result<(), palimpsest::git::error::GitError> + Send + 'static,
     {
         let store = self.store.clone();
+        let completion_tx = self.quick_launch_tx.clone();
         let current_repo_path = match store.get_state().current_repo.clone() {
             Some(path) => path,
             None => return,
@@ -880,6 +995,7 @@ impl PalimpsestApp {
             let repo = match GitRepo::open(&current_repo_path) {
                 Ok(r) => r,
                 Err(e) => {
+                    tracing::error!(path = %current_repo_path, error = %e, "Failed to open repo for git job");
                     if store.get_state().current_repo.as_ref() == Some(&current_repo_path) {
                         store.dispatch(AppAction::SetRepoError(Some(format!(
                             "Failed to open repo: {}",
@@ -887,14 +1003,21 @@ impl PalimpsestApp {
                         ))));
                         ctx.request_repaint();
                     }
+                    if let Some(action) = completion {
+                        let _ = completion_tx.send(action);
+                    }
                     return;
                 }
             };
 
             if let Err(e) = f(&repo) {
+                tracing::error!(path = %current_repo_path, error = %e, "Git job failed");
                 if store.get_state().current_repo.as_ref() == Some(&current_repo_path) {
                     store.dispatch(AppAction::SetRepoError(Some(e.to_string())));
                     ctx.request_repaint();
+                }
+                if let Some(action) = completion {
+                    let _ = completion_tx.send(action);
                 }
                 return;
             }
@@ -969,6 +1092,14 @@ impl PalimpsestApp {
                 }
 
                 ctx.request_repaint();
+            }
+
+            if store.get_state().current_repo.as_ref() == Some(&current_repo_path) {
+                store.dispatch(AppAction::SetRepoError(None));
+            }
+
+            if let Some(action) = completion {
+                let _ = completion_tx.send(action);
             }
         });
     }
@@ -1686,6 +1817,7 @@ impl eframe::App for PalimpsestApp {
         }
 
         self.process_repo_live_updates(ui.ctx());
+        self.process_quick_launch_updates();
 
         let state = self.store.get_state();
         let current_login = state.github_user.as_ref().map(|user| user.login.clone());
@@ -2206,10 +2338,20 @@ impl eframe::App for PalimpsestApp {
             match command_palette::show(
                 &ctx,
                 &mut self.command_palette_state,
+                &state,
                 self.git_repo.is_some(),
+                self.quick_launch_busy.as_ref(),
             ) {
                 PaletteResult::Action(a) => {
-                    self.show_command_palette = false;
+                    let keep_open = matches!(
+                        a,
+                        QuickLaunchAction::Fetch
+                            | QuickLaunchAction::Pull
+                            | QuickLaunchAction::Push
+                    );
+                    if !keep_open {
+                        self.show_command_palette = false;
+                    }
                     let ctx = ui.ctx().clone();
                     self.handle_quick_launch_action(a, &ctx);
                 }
@@ -2499,6 +2641,14 @@ impl eframe::App for PalimpsestApp {
                     }
                     sidebar::SidebarAction::OpenUrl(url) => {
                         open_url(&url);
+                    }
+                    sidebar::SidebarAction::Fetch => {
+                        self.handle_quick_launch_action(QuickLaunchAction::Fetch, &ctx);
+                        self.trigger_tracker_refresh();
+                    }
+                    sidebar::SidebarAction::RefreshActions => {
+                        self.store.dispatch(AppAction::SetGitHubLoading(true));
+                        self.trigger_tracker_refresh();
                     }
                 }
             }

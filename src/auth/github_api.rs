@@ -27,6 +27,11 @@ pub struct PullRequest {
     pub draft: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct ActionRunActor {
+    pub login: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ActionRun {
     pub id: u64,
@@ -35,8 +40,11 @@ pub struct ActionRun {
     pub conclusion: Option<String>,
     pub html_url: String,
     pub created_at: String,
+    pub updated_at: String,
     pub head_branch: String,
     pub event: String,
+    pub run_number: u32,
+    pub actor: Option<ActionRunActor>,
 }
 
 /// GitHub's list pull requests API nests the user login inside a `user` object.
@@ -709,13 +717,20 @@ mod tests {
             "conclusion": "success",
             "html_url": "https://github.com/user/repo/actions/runs/12345",
             "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:05:00Z",
             "head_branch": "main",
-            "event": "push"
+            "event": "push",
+            "run_number": 16,
+            "actor": {
+                "login": "parazeeknova"
+            }
         }"#;
         let action_run: ActionRun =
             serde_json::from_str(json).expect("deserialization should succeed");
         assert_eq!(action_run.id, 12345);
         assert_eq!(action_run.conclusion, Some("success".into()));
+        assert_eq!(action_run.run_number, 16);
+        assert_eq!(action_run.actor.unwrap().login, "parazeeknova");
     }
 
     #[test]
@@ -729,8 +744,13 @@ mod tests {
                     "conclusion": null,
                     "html_url": "https://github.com/user/repo/actions/runs/1",
                     "created_at": "2024-01-01T00:00:00Z",
+                    "updated_at": "2024-01-01T00:05:00Z",
                     "head_branch": "dev",
-                    "event": "pull_request"
+                    "event": "pull_request",
+                    "run_number": 17,
+                    "actor": {
+                        "login": "parazeeknova"
+                    }
                 }
             ]
         }"#;
