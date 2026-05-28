@@ -1,11 +1,12 @@
+use crate::state::{AppState, CachedBranch, CachedStash};
 use eframe::egui;
 use egui::Key;
 use egui::KeyboardShortcut;
 use egui::Modifiers;
 use egui::containers::modal::Modal;
 use egui_phosphor::regular::{
-    ARROW_CLOCKWISE, ARROW_COUNTER_CLOCKWISE, FILE_PLUS, FOLDER, GIT_FORK, GIT_PULL_REQUEST, POWER,
-    TERMINAL_WINDOW, TRASH,
+    ARROW_CLOCKWISE, ARROW_COUNTER_CLOCKWISE, FILE_PLUS, FOLDER, GEAR, GIT_BRANCH, GIT_FORK,
+    GIT_PULL_REQUEST, MAGNIFYING_GLASS, POWER, TAG, TERMINAL_WINDOW, TRASH,
 };
 
 fn primary_modifiers() -> Modifiers {
@@ -16,189 +17,352 @@ fn primary_modifiers() -> Modifiers {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QuickLaunchAction {
     OpenRepository,
     ExitApp,
     OpenLogs,
+    Refresh,
+    NextTab,
+    PreviousTab,
     Fetch,
     Pull,
     Push,
     StageAll,
+    UnstageAll,
     DiscardAll,
     CreateBranch,
+    CreateTag,
+    SaveStash,
+    CheckoutBranch(String),
+    DeleteBranch(String),
+    ApplyStash(usize),
+    PopStash(usize),
+    DropStash(usize),
 }
 
 #[derive(Clone)]
 struct CommandEntry {
     icon: &'static str,
-    label: &'static str,
-    keywords: &'static str,
+    label: String,
+    keywords: String,
     action: QuickLaunchAction,
     requires_repo: bool,
     shortcut: Option<&'static str>,
 }
 
-fn all_commands() -> Vec<CommandEntry> {
+fn fixed_commands() -> Vec<CommandEntry> {
+    let mut commands = Vec::new();
+
+    let push = |commands: &mut Vec<CommandEntry>,
+                icon: &'static str,
+                label: &str,
+                keywords: &str,
+                action: QuickLaunchAction,
+                requires_repo: bool,
+                shortcut: Option<&'static str>| {
+        commands.push(CommandEntry {
+            icon,
+            label: label.to_string(),
+            keywords: keywords.to_string(),
+            action,
+            requires_repo,
+            shortcut,
+        });
+    };
+
     if cfg!(target_os = "macos") {
-        vec![
-            CommandEntry {
-                icon: FOLDER,
-                label: "Open Repository",
-                keywords: "open repo folder directory pick",
-                action: QuickLaunchAction::OpenRepository,
-                requires_repo: false,
-                shortcut: Some("⌘O"),
-            },
-            CommandEntry {
-                icon: POWER,
-                label: "Exit App",
-                keywords: "exit quit close shutdown",
-                action: QuickLaunchAction::ExitApp,
-                requires_repo: false,
-                shortcut: Some("⌘Q"),
-            },
-            CommandEntry {
-                icon: TERMINAL_WINDOW,
-                label: "Open Logs",
-                keywords: "logs debug console trace info error",
-                action: QuickLaunchAction::OpenLogs,
-                requires_repo: false,
-                shortcut: Some("⇧⌘L"),
-            },
-            CommandEntry {
-                icon: ARROW_COUNTER_CLOCKWISE,
-                label: "Fetch",
-                keywords: "fetch remote update",
-                action: QuickLaunchAction::Fetch,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: ARROW_CLOCKWISE,
-                label: "Pull",
-                keywords: "pull download sync",
-                action: QuickLaunchAction::Pull,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: GIT_PULL_REQUEST,
-                label: "Push",
-                keywords: "push upload sync",
-                action: QuickLaunchAction::Push,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: FILE_PLUS,
-                label: "Stage All",
-                keywords: "stage add all files changes",
-                action: QuickLaunchAction::StageAll,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: TRASH,
-                label: "Discard All",
-                keywords: "discard reset undo changes",
-                action: QuickLaunchAction::DiscardAll,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: GIT_FORK,
-                label: "Create Branch",
-                keywords: "branch new create fork",
-                action: QuickLaunchAction::CreateBranch,
-                requires_repo: true,
-                shortcut: None,
-            },
-        ]
+        push(
+            &mut commands,
+            FOLDER,
+            "Open Repository",
+            "open repo folder directory pick",
+            QuickLaunchAction::OpenRepository,
+            false,
+            Some("⌘O"),
+        );
+        push(
+            &mut commands,
+            POWER,
+            "Exit App",
+            "exit quit close shutdown",
+            QuickLaunchAction::ExitApp,
+            false,
+            Some("⌘Q"),
+        );
+        push(
+            &mut commands,
+            TERMINAL_WINDOW,
+            "Open Logs",
+            "logs debug console trace info error",
+            QuickLaunchAction::OpenLogs,
+            false,
+            Some("⇧⌘L"),
+        );
+        push(
+            &mut commands,
+            GIT_BRANCH,
+            "Next Tab",
+            "tab next forward switch",
+            QuickLaunchAction::NextTab,
+            false,
+            Some("⌘Tab"),
+        );
+        push(
+            &mut commands,
+            GIT_BRANCH,
+            "Previous Tab",
+            "tab prev back switch",
+            QuickLaunchAction::PreviousTab,
+            false,
+            Some("⌘Shift+Tab"),
+        );
     } else {
-        vec![
-            CommandEntry {
-                icon: FOLDER,
-                label: "Open Repository",
-                keywords: "open repo folder directory pick",
-                action: QuickLaunchAction::OpenRepository,
-                requires_repo: false,
-                shortcut: Some("Ctrl+O"),
-            },
-            CommandEntry {
-                icon: POWER,
-                label: "Exit App",
-                keywords: "exit quit close shutdown",
-                action: QuickLaunchAction::ExitApp,
-                requires_repo: false,
-                shortcut: Some("Ctrl+Q"),
-            },
-            CommandEntry {
-                icon: TERMINAL_WINDOW,
-                label: "Open Logs",
-                keywords: "logs debug console trace info error",
-                action: QuickLaunchAction::OpenLogs,
-                requires_repo: false,
-                shortcut: Some("Ctrl+Shift+L"),
-            },
-            CommandEntry {
-                icon: ARROW_COUNTER_CLOCKWISE,
-                label: "Fetch",
-                keywords: "fetch remote update",
-                action: QuickLaunchAction::Fetch,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: ARROW_CLOCKWISE,
-                label: "Pull",
-                keywords: "pull download sync",
-                action: QuickLaunchAction::Pull,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: GIT_PULL_REQUEST,
-                label: "Push",
-                keywords: "push upload sync",
-                action: QuickLaunchAction::Push,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: FILE_PLUS,
-                label: "Stage All",
-                keywords: "stage add all files changes",
-                action: QuickLaunchAction::StageAll,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: TRASH,
-                label: "Discard All",
-                keywords: "discard reset undo changes",
-                action: QuickLaunchAction::DiscardAll,
-                requires_repo: true,
-                shortcut: None,
-            },
-            CommandEntry {
-                icon: GIT_FORK,
-                label: "Create Branch",
-                keywords: "branch new create fork",
-                action: QuickLaunchAction::CreateBranch,
-                requires_repo: true,
-                shortcut: None,
-            },
-        ]
+        push(
+            &mut commands,
+            FOLDER,
+            "Open Repository",
+            "open repo folder directory pick",
+            QuickLaunchAction::OpenRepository,
+            false,
+            Some("Ctrl+O"),
+        );
+        push(
+            &mut commands,
+            POWER,
+            "Exit App",
+            "exit quit close shutdown",
+            QuickLaunchAction::ExitApp,
+            false,
+            Some("Ctrl+Q"),
+        );
+        push(
+            &mut commands,
+            TERMINAL_WINDOW,
+            "Open Logs",
+            "logs debug console trace info error",
+            QuickLaunchAction::OpenLogs,
+            false,
+            Some("Ctrl+Shift+L"),
+        );
+        push(
+            &mut commands,
+            GIT_BRANCH,
+            "Next Tab",
+            "tab next forward switch",
+            QuickLaunchAction::NextTab,
+            false,
+            Some("Ctrl+Tab"),
+        );
+        push(
+            &mut commands,
+            GIT_BRANCH,
+            "Previous Tab",
+            "tab prev back switch",
+            QuickLaunchAction::PreviousTab,
+            false,
+            Some("Ctrl+Shift+Tab"),
+        );
     }
+
+    push(
+        &mut commands,
+        ARROW_COUNTER_CLOCKWISE,
+        "Fetch",
+        "fetch remote update sync",
+        QuickLaunchAction::Fetch,
+        true,
+        Some(if cfg!(target_os = "macos") {
+            "⇧⌘F"
+        } else {
+            "Ctrl+Shift+F"
+        }),
+    );
+    push(
+        &mut commands,
+        ARROW_CLOCKWISE,
+        "Pull",
+        "pull download sync merge",
+        QuickLaunchAction::Pull,
+        true,
+        Some(if cfg!(target_os = "macos") {
+            "⇧⌘U"
+        } else {
+            "Ctrl+Shift+U"
+        }),
+    );
+    push(
+        &mut commands,
+        GIT_PULL_REQUEST,
+        "Push",
+        "push upload sync publish",
+        QuickLaunchAction::Push,
+        true,
+        Some(if cfg!(target_os = "macos") {
+            "⇧⌘P"
+        } else {
+            "Ctrl+Shift+P"
+        }),
+    );
+    push(
+        &mut commands,
+        FILE_PLUS,
+        "Stage All",
+        "stage add all files changes",
+        QuickLaunchAction::StageAll,
+        true,
+        None,
+    );
+    push(
+        &mut commands,
+        GEAR,
+        "Unstage All",
+        "unstage reset index clear staged",
+        QuickLaunchAction::UnstageAll,
+        true,
+        None,
+    );
+    push(
+        &mut commands,
+        TRASH,
+        "Discard All",
+        "discard reset undo changes",
+        QuickLaunchAction::DiscardAll,
+        true,
+        None,
+    );
+    push(
+        &mut commands,
+        GIT_FORK,
+        "Create Branch",
+        "branch new create fork",
+        QuickLaunchAction::CreateBranch,
+        true,
+        Some(if cfg!(target_os = "macos") {
+            "⇧⌘B"
+        } else {
+            "Ctrl+Shift+B"
+        }),
+    );
+    push(
+        &mut commands,
+        TAG,
+        "Create Tag",
+        "tag label release version",
+        QuickLaunchAction::CreateTag,
+        true,
+        Some(if cfg!(target_os = "macos") {
+            "⇧⌘T"
+        } else {
+            "Ctrl+Shift+T"
+        }),
+    );
+    push(
+        &mut commands,
+        GIT_PULL_REQUEST,
+        "Save Stash",
+        "stash save wip",
+        QuickLaunchAction::SaveStash,
+        true,
+        Some(if cfg!(target_os = "macos") {
+            "⇧⌘H"
+        } else {
+            "Ctrl+Shift+H"
+        }),
+    );
+    push(
+        &mut commands,
+        ARROW_CLOCKWISE,
+        "Refresh",
+        "refresh reload update f5",
+        QuickLaunchAction::Refresh,
+        true,
+        Some("F5"),
+    );
+
+    commands
+}
+
+fn branch_commands(branches: &[CachedBranch]) -> Vec<CommandEntry> {
+    branches
+        .iter()
+        .filter(|branch| !branch.is_current)
+        .flat_map(|branch| {
+            let checkout = CommandEntry {
+                icon: GIT_BRANCH,
+                label: format!("Checkout Branch: {}", branch.name),
+                keywords: format!("checkout switch branch {}", branch.name),
+                action: QuickLaunchAction::CheckoutBranch(branch.name.clone()),
+                requires_repo: true,
+                shortcut: None,
+            };
+            let delete = CommandEntry {
+                icon: TRASH,
+                label: format!("Delete Branch: {}", branch.name),
+                keywords: format!("delete remove branch {}", branch.name),
+                action: QuickLaunchAction::DeleteBranch(branch.name.clone()),
+                requires_repo: true,
+                shortcut: None,
+            };
+            [checkout, delete]
+        })
+        .collect()
+}
+
+fn stash_commands(stashes: &[CachedStash]) -> Vec<CommandEntry> {
+    stashes
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, stash)| {
+            let label_suffix = if stash.message.is_empty() {
+                format!("stash@{{{}}}", idx)
+            } else {
+                format!("stash@{{{}}}: {}", idx, stash.message)
+            };
+
+            let apply = CommandEntry {
+                icon: ARROW_CLOCKWISE,
+                label: format!("Apply Stash: {}", label_suffix),
+                keywords: format!("stash apply {} {}", idx, stash.message),
+                action: QuickLaunchAction::ApplyStash(idx),
+                requires_repo: true,
+                shortcut: None,
+            };
+            let pop = CommandEntry {
+                icon: ARROW_COUNTER_CLOCKWISE,
+                label: format!("Pop Stash: {}", label_suffix),
+                keywords: format!("stash pop {} {}", idx, stash.message),
+                action: QuickLaunchAction::PopStash(idx),
+                requires_repo: true,
+                shortcut: None,
+            };
+            let drop = CommandEntry {
+                icon: TRASH,
+                label: format!("Drop Stash: {}", label_suffix),
+                keywords: format!("stash drop delete {} {}", idx, stash.message),
+                action: QuickLaunchAction::DropStash(idx),
+                requires_repo: true,
+                shortcut: None,
+            };
+            [apply, pop, drop]
+        })
+        .collect()
+}
+
+fn all_commands(app_state: &AppState) -> Vec<CommandEntry> {
+    let mut commands = fixed_commands();
+    commands.extend(branch_commands(&app_state.cached_branches));
+    commands.extend(stash_commands(&app_state.cached_stashes));
+    commands
 }
 
 fn matches_query(query: &str, entry: &CommandEntry) -> bool {
     if query.is_empty() {
         return true;
     }
+
     let q = query.to_lowercase();
-    entry.label.to_lowercase().contains(&q) || entry.keywords.contains(&q)
+    entry.label.to_lowercase().contains(&q) || entry.keywords.to_lowercase().contains(&q)
 }
 
 #[derive(Default)]
@@ -213,8 +377,14 @@ pub enum PaletteResult {
     Action(QuickLaunchAction),
 }
 
-pub fn show(ctx: &egui::Context, state: &mut State, has_repo: bool) -> PaletteResult {
-    let commands = all_commands();
+pub fn show(
+    ctx: &egui::Context,
+    state: &mut State,
+    app_state: &AppState,
+    has_repo: bool,
+    busy_action: Option<&QuickLaunchAction>,
+) -> PaletteResult {
+    let commands = all_commands(app_state);
     let filtered: Vec<&CommandEntry> = commands
         .iter()
         .filter(|c| matches_query(&state.query, c) && (!c.requires_repo || has_repo))
@@ -264,19 +434,35 @@ pub fn show(ctx: &egui::Context, state: &mut State, has_repo: bool) -> PaletteRe
         );
 
         let text_edit_rect = egui::Rect::from_min_size(
-            egui::pos2(search_rect.left() + 8.0, search_rect.top() + 8.0),
-            egui::vec2(search_rect.width() - 50.0, search_rect.height() - 4.0),
+            egui::pos2(search_rect.left() + 8.0, search_rect.top() + 4.0),
+            egui::vec2(search_rect.width() - 50.0, search_rect.height() - 8.0),
         );
         let search_response =
             ui.scope_builder(egui::UiBuilder::new().max_rect(text_edit_rect), |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut state.query)
-                        .hint_text("Type a command...")
-                        .desired_width(text_edit_rect.width())
-                        .font(egui::FontId::proportional(15.0))
-                        .frame(egui::Frame::NONE)
-                        .background_color(editor_fill),
-                )
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(MAGNIFYING_GLASS)
+                            .size(13.0)
+                            .color(egui::Color32::from_rgb(120, 120, 120)),
+                    );
+                    ui.add_space(6.0);
+
+                    ui.vertical(|ui| {
+                        ui.add_space(4.0);
+                        let input_width = ui.available_width();
+                        ui.add_sized(
+                            [input_width, 20.0],
+                            egui::TextEdit::singleline(&mut state.query)
+                                .hint_text("Type a command...")
+                                .font(egui::FontId::proportional(15.0))
+                                .frame(egui::Frame::NONE)
+                                .background_color(editor_fill),
+                        )
+                    })
+                    .inner
+                })
+                .inner
             });
         ui.add_space(2.0);
 
@@ -288,17 +474,22 @@ pub fn show(ctx: &egui::Context, state: &mut State, has_repo: bool) -> PaletteRe
             return None;
         }
 
-        if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
-            state.selected_index = (state.selected_index + 1).min(filtered.len().saturating_sub(1));
-        }
+        let is_busy = busy_action.is_some();
 
-        if ctx.input(|i| i.key_pressed(Key::ArrowUp)) {
-            state.selected_index = state.selected_index.saturating_sub(1);
-        }
+        if !is_busy {
+            if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
+                state.selected_index =
+                    (state.selected_index + 1).min(filtered.len().saturating_sub(1));
+            }
 
-        if ctx.input(|i| i.key_pressed(Key::Enter)) {
-            if let Some(entry) = filtered.get(state.selected_index) {
-                return Some(entry.action.clone());
+            if ctx.input(|i| i.key_pressed(Key::ArrowUp)) {
+                state.selected_index = state.selected_index.saturating_sub(1);
+            }
+
+            if ctx.input(|i| i.key_pressed(Key::Enter)) {
+                if let Some(entry) = filtered.get(state.selected_index) {
+                    return Some(entry.action.clone());
+                }
             }
         }
 
@@ -313,14 +504,17 @@ pub fn show(ctx: &egui::Context, state: &mut State, has_repo: bool) -> PaletteRe
             .show(ui, |ui| {
                 for (i, entry) in filtered.iter().enumerate() {
                     let is_selected = i == state.selected_index;
+                    let is_busy_row = busy_action.is_some_and(|busy| busy == &entry.action);
                     let row_response = ui.add(CommandRow {
                         icon: entry.icon,
-                        label: entry.label,
+                        label: &entry.label,
                         shortcut: entry.shortcut,
                         is_selected,
+                        disabled: is_busy && !is_busy_row,
+                        busy: is_busy_row,
                     });
 
-                    if row_response.clicked() {
+                    if row_response.clicked() && !is_busy {
                         return Some(entry.action.clone());
                     }
 
@@ -358,20 +552,31 @@ struct CommandRow<'a> {
     label: &'a str,
     shortcut: Option<&'a str>,
     is_selected: bool,
+    disabled: bool,
+    busy: bool,
 }
 
 impl egui::Widget for CommandRow<'_> {
     fn ui(self, ui: &mut egui::Ui) -> egui::Response {
         let height = 32.0;
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), height),
-            egui::Sense::click(),
-        );
+        let sense = if self.disabled {
+            egui::Sense::hover()
+        } else {
+            egui::Sense::click()
+        };
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), height), sense);
 
         if self.is_selected {
             ui.painter()
                 .rect_filled(rect, 4.0, egui::Color32::from_rgb(52, 52, 52));
         }
+
+        let tint = if self.disabled {
+            egui::Color32::from_rgb(135, 135, 135)
+        } else {
+            ui.visuals().text_color()
+        };
 
         let icon_x = rect.left() + 12.0;
         let icon_y = rect.center().y;
@@ -380,7 +585,7 @@ impl egui::Widget for CommandRow<'_> {
             egui::Align2::CENTER_CENTER,
             self.icon,
             egui::FontId::proportional(16.0),
-            ui.visuals().text_color(),
+            tint,
         );
 
         let label_x = icon_x + 28.0;
@@ -389,10 +594,16 @@ impl egui::Widget for CommandRow<'_> {
             egui::Align2::LEFT_CENTER,
             self.label,
             egui::FontId::proportional(13.0),
-            ui.visuals().text_color(),
+            tint,
         );
 
-        if let Some(shortcut) = self.shortcut {
+        if self.busy {
+            let spinner_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - 18.0, rect.center().y),
+                egui::vec2(12.0, 12.0),
+            );
+            ui.put(spinner_rect, egui::Spinner::new().size(12.0));
+        } else if let Some(shortcut) = self.shortcut {
             let shortcut_x = rect.right() - 12.0;
             ui.painter().text(
                 egui::pos2(shortcut_x, rect.center().y),

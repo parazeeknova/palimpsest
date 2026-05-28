@@ -12,10 +12,47 @@ const SESSION_VERSION: u32 = 2;
 const SESSION_FILE_NAME: &str = "session.json";
 const APP_ID: &str = "Palimpsest";
 
+fn compare_tag_names_by_parsed_version(a: &str, b: &str) -> std::cmp::Ordering {
+    use crate::ui::repo_manager::parse_tag_version;
+    let va = parse_tag_version(a);
+    let vb = parse_tag_version(b);
+    match vb.cmp(&va) {
+        std::cmp::Ordering::Equal => b.cmp(a),
+        other => other,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentRepo {
     pub path: String,
     pub last_opened: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoSidebarStates {
+    pub branches_expanded: bool,
+    pub remotes_expanded: bool,
+    pub tags_expanded: bool,
+    pub stashes_expanded: bool,
+    pub prs_expanded: bool,
+    pub runs_expanded: bool,
+    pub releases_expanded: bool,
+    pub packages_expanded: bool,
+}
+
+impl Default for RepoSidebarStates {
+    fn default() -> Self {
+        Self {
+            branches_expanded: true,
+            remotes_expanded: false,
+            tags_expanded: false,
+            stashes_expanded: false,
+            prs_expanded: false,
+            runs_expanded: false,
+            releases_expanded: false,
+            packages_expanded: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +74,8 @@ pub struct AppSession {
     pub commit_drawer_layout: CommitDrawerLayout,
     #[serde(default = "default_drawer_height")]
     pub commit_drawer_height: u32,
+    #[serde(default)]
+    pub repo_sidebar_states: std::collections::HashMap<String, RepoSidebarStates>,
 }
 
 impl Default for AppSession {
@@ -53,6 +92,7 @@ impl Default for AppSession {
             git_user_email: None,
             commit_drawer_layout: CommitDrawerLayout::Horizontal,
             commit_drawer_height: default_drawer_height(),
+            repo_sidebar_states: std::collections::HashMap::new(),
         }
     }
 }
@@ -89,6 +129,7 @@ impl AppSession {
             git_user_email: state.git_identity.as_ref().and_then(|i| i.email.clone()),
             commit_drawer_layout: state.commit_drawer_layout,
             commit_drawer_height: state.commit_drawer_height as u32,
+            repo_sidebar_states: state.repo_sidebar_states.clone(),
         }
         .normalize()
     }
@@ -118,6 +159,7 @@ impl AppSession {
             manager_details_cache: Vec::new(),
             repo_ownership: Vec::new(),
             manager_repo_filter: session.manager_repo_filter,
+            repo_sidebar_states: session.repo_sidebar_states,
             github_user: None,
             git_identity: if session.git_user_name.is_some() || session.git_user_email.is_some() {
                 Some(CachedGitIdentity {
@@ -267,6 +309,7 @@ pub struct AppState {
     pub avatar_cache: std::collections::HashMap<String, String>,
     pub commit_drawer_layout: CommitDrawerLayout,
     pub commit_drawer_height: f32,
+    pub repo_sidebar_states: std::collections::HashMap<String, RepoSidebarStates>,
 }
 
 impl PartialEq for AppState {
@@ -301,6 +344,7 @@ impl PartialEq for AppState {
             && self.github_error == other.github_error
             && self.commit_drawer_layout == other.commit_drawer_layout
             && self.commit_drawer_height == other.commit_drawer_height
+            && self.repo_sidebar_states == other.repo_sidebar_states
     }
 }
 
@@ -321,6 +365,8 @@ pub struct CachedBranch {
     pub is_remote: bool,
     pub upstream: Option<String>,
     pub tip_hash: String,
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -463,6 +509,14 @@ pub struct GitHubActionRun {
     pub conclusion: Option<String>,
     pub html_url: String,
     pub head_branch: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub run_number: u32,
+    #[serde(default)]
+    pub actor_login: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -530,6 +584,7 @@ impl Default for AppState {
             avatar_cache: std::collections::HashMap::new(),
             commit_drawer_layout: CommitDrawerLayout::Horizontal,
             commit_drawer_height: 240.0,
+            repo_sidebar_states: std::collections::HashMap::new(),
         }
     }
 }
@@ -692,6 +747,8 @@ impl AppState {
                 is_remote: b.is_remote,
                 upstream: b.upstream.clone(),
                 tip_hash: b.tip_hash.clone(),
+                ahead: b.ahead,
+                behind: b.behind,
             })
             .collect();
         self
@@ -709,13 +766,17 @@ impl AppState {
     }
 
     pub fn with_cached_tags(mut self, tags: &[Tag]) -> Self {
-        self.cached_tags = tags
+        let mut cached: Vec<CachedTag> = tags
             .iter()
             .map(|t| CachedTag {
                 name: t.name.clone(),
                 target_hash: t.target_hash.clone(),
             })
             .collect();
+
+        cached.sort_by(|a, b| compare_tag_names_by_parsed_version(&a.name, &b.name));
+
+        self.cached_tags = cached;
         self
     }
 
@@ -812,6 +873,10 @@ pub enum AppAction {
     },
     SetCommitDrawerLayout(CommitDrawerLayout),
     SetCommitDrawerHeight(f32),
+    SetRepoSidebarStates {
+        repo_path: String,
+        states: RepoSidebarStates,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -839,6 +904,10 @@ pub enum BranchAction {
     Checkout(String),
     Delete(String),
     CreateAndCheckout(String),
+    CheckoutRemote {
+        local_name: String,
+        remote_name: String,
+    },
 }
 
 fn reducer(state: &AppState, action: &AppAction) -> AppState {
@@ -974,6 +1043,12 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
                 .into_iter()
                 .filter(|(k, _)| k != path)
                 .collect(),
+            repo_sidebar_states: state
+                .repo_sidebar_states
+                .clone()
+                .into_iter()
+                .filter(|(k, _)| k != path)
+                .collect(),
             ..state.clone()
         },
         AppAction::SetGitHubUser(user) => AppState {
@@ -997,15 +1072,21 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
             action_runs,
             releases,
             packages,
-        } => AppState {
-            github_pull_requests: pull_requests.clone(),
-            github_action_runs: action_runs.clone(),
-            github_releases: releases.clone(),
-            github_packages: packages.clone(),
-            github_loading: false,
-            github_error: None,
-            ..state.clone()
-        },
+        } => {
+            let mut sorted_releases = releases.clone();
+            sorted_releases
+                .sort_by(|a, b| compare_tag_names_by_parsed_version(&a.tag_name, &b.tag_name));
+
+            AppState {
+                github_pull_requests: pull_requests.clone(),
+                github_action_runs: action_runs.clone(),
+                github_releases: sorted_releases,
+                github_packages: packages.clone(),
+                github_loading: false,
+                github_error: None,
+                ..state.clone()
+            }
+        }
         AppAction::SetGitHubLoading(loading) => AppState {
             github_loading: *loading,
             ..state.clone()
@@ -1031,6 +1112,15 @@ fn reducer(state: &AppState, action: &AppAction) -> AppState {
             commit_drawer_height: *height,
             ..state.clone()
         },
+        AppAction::SetRepoSidebarStates { repo_path, states } => {
+            tracing::debug!("Sidebar section states updated");
+            let mut repo_sidebar_states = state.repo_sidebar_states.clone();
+            repo_sidebar_states.insert(repo_path.clone(), states.clone());
+            AppState {
+                repo_sidebar_states,
+                ..state.clone()
+            }
+        }
     }
 }
 
@@ -1288,6 +1378,7 @@ mod tests {
             git_user_email: None,
             commit_drawer_layout: CommitDrawerLayout::Horizontal,
             commit_drawer_height: 240,
+            repo_sidebar_states: std::collections::HashMap::new(),
         };
 
         let state = session.clone().into_state();

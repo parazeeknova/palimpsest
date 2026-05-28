@@ -72,6 +72,10 @@ pub enum RepoLiveEvent {
         files: Vec<crate::git::models::FileStatus>,
         diff: Option<CommitDiffViewModel>,
     },
+    RemoteSyncCompleted {
+        path: String,
+        generation: u64,
+    },
 }
 
 fn now_millis() -> u128 {
@@ -484,6 +488,17 @@ pub fn spawn_repo_tracker(
             releases_etag = disk_cache.releases_etag;
             packages_container_etag = disk_cache.packages_container_etag;
             packages_npm_etag = disk_cache.packages_npm_etag;
+
+            // If the cached action runs are in the legacy format, clear the ETag to force a 200 OK sync
+            if let Some(ref r) = cached_remote {
+                let has_old_runs = r
+                    .action_runs
+                    .iter()
+                    .any(|run| run.run_number == 0 || run.created_at.is_empty());
+                if has_old_runs {
+                    actions_etag = None;
+                }
+            }
         }
 
         let mut current_local = cached_local.unwrap_or_else(|| RepoLocalSnapshot {
@@ -497,6 +512,21 @@ pub fn spawn_repo_tracker(
             last_refresh: None,
             ownership: None,
         });
+
+        // Dispatch cached snapshots immediately so the main thread's memory state is populated
+        let _ = tx.send(RepoLiveEvent::Local {
+            path: path.clone(),
+            generation,
+            snapshot: current_local.clone(),
+        });
+        if let Some(ref r) = cached_remote {
+            let _ = tx.send(RepoLiveEvent::Remote {
+                path: path.clone(),
+                generation,
+                snapshot: r.clone(),
+            });
+        }
+        ctx.request_repaint();
 
         let watch_tx_watcher = watch_tx.clone();
         let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
@@ -524,6 +554,13 @@ pub fn spawn_repo_tracker(
         let mut pending_fingerprints_save = false;
 
         let mut dirty_slices = DirtySlices::default();
+
+        let needs_refs_revalidation = current_local.branches.iter().any(|b| {
+            !b.is_remote && b.upstream.is_some() && b.ahead.is_none() && b.behind.is_none()
+        });
+        if needs_refs_revalidation {
+            dirty_slices.refs = true;
+        }
 
         // Compute initial fingerprint check
         let current_fps = crate::git::cache::compute_repo_fingerprints(&path);
@@ -559,11 +596,18 @@ pub fn spawn_repo_tracker(
         let remote_poll_interval = Duration::from_secs(180);
         let mut last_remote_refresh = Instant::now() - remote_poll_interval;
         if let Some(ref r) = cached_remote {
-            if let Some(ref_time) = r.last_refresh {
-                let elapsed_ms = now_millis().saturating_sub(ref_time);
-                let elapsed_secs = (elapsed_ms / 1000) as u64;
-                if elapsed_secs < 180 {
-                    last_remote_refresh = Instant::now() - Duration::from_secs(180 - elapsed_secs);
+            let has_old_runs = r
+                .action_runs
+                .iter()
+                .any(|run| run.run_number == 0 || run.created_at.is_empty());
+            if !has_old_runs {
+                if let Some(ref_time) = r.last_refresh {
+                    let elapsed_ms = now_millis().saturating_sub(ref_time);
+                    let elapsed_secs = (elapsed_ms / 1000) as u64;
+                    if elapsed_secs < 180 {
+                        last_remote_refresh =
+                            Instant::now() - Duration::from_secs(180 - elapsed_secs);
+                    }
                 }
             }
         }
@@ -1001,6 +1045,10 @@ pub fn spawn_repo_tracker(
                                             conclusion: run.conclusion,
                                             html_url: run.html_url,
                                             head_branch: run.head_branch,
+                                            created_at: run.created_at,
+                                            updated_at: run.updated_at,
+                                            run_number: run.run_number,
+                                            actor_login: run.actor.unwrap_or_default().login,
                                         })
                                         .collect();
                                     if cached_remote.is_none() {
@@ -1244,6 +1292,12 @@ pub fn spawn_repo_tracker(
                                     tracing::warn!(repo = %path, err = %err, "Failed to save repository cache after remote sync to SQLite");
                                     pending_full_save = true;
                                 }
+                            } else {
+                                let _ = tx.send(RepoLiveEvent::RemoteSyncCompleted {
+                                    path: path.clone(),
+                                    generation,
+                                });
+                                ctx.request_repaint();
                             }
 
                             if !errors.is_empty() {

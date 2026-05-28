@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::SystemTime;
 
-use git2::{Repository, Sort, StashFlags, StatusOptions};
+use git2::{
+    Cred, FetchOptions, PushOptions, RemoteCallbacks, Repository, Sort, StashFlags, StatusOptions,
+};
 
 use crate::cdv::{
     CommitDiffFile, CommitDiffFileKind, CommitDiffHunk, CommitDiffLine, CommitDiffLineKind,
@@ -72,8 +74,17 @@ impl GitRepo {
 
     pub fn commits(&self, limit: Option<usize>) -> Result<Vec<Commit>, GitError> {
         let mut revwalk = self.repo.revwalk()?;
-        revwalk.set_sorting(Sort::TOPOLOGICAL)?;
-        revwalk.push_head()?;
+        revwalk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)?;
+
+        let pushed_head = revwalk.push_head();
+        let _ = revwalk.push_glob("refs/heads/*");
+        let _ = revwalk.push_glob("refs/remotes/*");
+
+        if let Err(e) = pushed_head {
+            if self.repo.references()?.count() == 0 {
+                return Err(GitError::from(e));
+            }
+        }
 
         let mut commits = Vec::new();
         for oid_result in revwalk {
@@ -572,10 +583,26 @@ impl GitRepo {
             let tip = branch.get().peel_to_commit()?;
             let is_current = head_name.as_deref() == Some(&name);
 
-            let upstream = branch
-                .upstream()
-                .ok()
+            let upstream_branch = branch.upstream().ok();
+            let upstream = upstream_branch
+                .as_ref()
                 .map(|b| b.name().ok().flatten().unwrap_or("unknown").to_string());
+
+            let mut ahead = None;
+            let mut behind = None;
+            if let Some(ref ub) = upstream_branch {
+                if let (Ok(local_commit), Ok(upstream_commit)) =
+                    (branch.get().peel_to_commit(), ub.get().peel_to_commit())
+                {
+                    if let Ok((a, b)) = self
+                        .repo
+                        .graph_ahead_behind(local_commit.id(), upstream_commit.id())
+                    {
+                        ahead = Some(a);
+                        behind = Some(b);
+                    }
+                }
+            }
 
             branches.push(Branch {
                 name,
@@ -583,6 +610,8 @@ impl GitRepo {
                 is_remote: false,
                 upstream,
                 tip_hash: tip.id().to_string()[..7].to_string(),
+                ahead,
+                behind,
             });
         }
 
@@ -597,6 +626,8 @@ impl GitRepo {
                 is_remote: true,
                 upstream: None,
                 tip_hash: tip.id().to_string()[..7].to_string(),
+                ahead: None,
+                behind: None,
             });
         }
 
@@ -625,7 +656,7 @@ impl GitRepo {
 
     pub fn tags(&self) -> Result<Vec<Tag>, GitError> {
         let tags = self.repo.tag_names(None)?;
-        let result: Vec<Tag> = tags
+        let mut result: Vec<Tag> = tags
             .iter()
             .filter_map(|r| r.ok().flatten())
             .map(|name| {
@@ -660,6 +691,19 @@ impl GitRepo {
             })
             .collect::<Result<Vec<_>, git2::Error>>()?;
 
+        result.sort_by(|a, b| {
+            let (ma, mja, pa, ra) = parse_tag_name_version(&a.name);
+            let (mb, mjb, pb, rb) = parse_tag_name_version(&b.name);
+            match (mb, mjb, pb).cmp(&(ma, mja, pa)) {
+                std::cmp::Ordering::Equal => match (&rb, &ra) {
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (a_prerelease, b_prerelease) => a_prerelease.cmp(b_prerelease),
+                },
+                other => other,
+            }
+        });
+
         tracing::debug!(count = result.len(), "Tags fetched");
         Ok(result)
     }
@@ -673,9 +717,16 @@ impl GitRepo {
             .collect();
 
         tag_names.sort_by(|a, b| {
-            let va = parse_tag_name_version(a);
-            let vb = parse_tag_name_version(b);
-            vb.cmp(&va)
+            let (ma, mja, pa, ra) = parse_tag_name_version(a);
+            let (mb, mjb, pb, rb) = parse_tag_name_version(b);
+            match (mb, mjb, pb).cmp(&(ma, mja, pa)) {
+                std::cmp::Ordering::Equal => match (&rb, &ra) {
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (a_prerelease, b_prerelease) => a_prerelease.cmp(b_prerelease),
+                },
+                other => other,
+            }
         });
 
         let names_to_peel = if let Some(l) = limit {
@@ -1162,6 +1213,7 @@ impl GitRepo {
         }
     }
 
+    #[allow(dead_code)]
     fn resolve_upstream_or_fallback(&self) -> Result<(String, String, bool), GitError> {
         let mut remote_name = None;
         let mut remote_branch = None;
@@ -1220,80 +1272,148 @@ impl GitRepo {
 
         Ok((remote_name, remote_branch, has_upstream))
     }
+}
+
+pub struct GitCommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub fn derive_clone_destination(url: &str, base_path: &str) -> std::path::PathBuf {
+    let mut final_path = std::path::PathBuf::from(base_path);
+    if final_path.is_dir() {
+        let mut url_trimmed = url.trim().trim_end_matches('/');
+        if url_trimmed.ends_with(".git") {
+            url_trimmed = &url_trimmed[..url_trimmed.len() - 4];
+        }
+        let repo_name = if let Some(pos) = url_trimmed.rfind('/') {
+            &url_trimmed[pos + 1..]
+        } else if let Some(pos) = url_trimmed.rfind(':') {
+            &url_trimmed[pos + 1..]
+        } else {
+            url_trimmed
+        };
+        if !repo_name.is_empty() {
+            final_path.push(repo_name);
+        }
+    }
+    final_path
+}
+
+impl GitRepo {
+    pub fn run_git_command(&self, args: &[&str]) -> Result<GitCommandOutput, GitError> {
+        let workdir = self.repo.workdir().unwrap_or_else(|| self.repo.path());
+        let output = Command::new("git")
+            .current_dir(workdir)
+            .args(args)
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if output.status.success() {
+            Ok(GitCommandOutput { stdout, stderr })
+        } else {
+            let err_msg = if stderr.trim().is_empty() {
+                format!("git exit code: {}", output.status.code().unwrap_or(-1))
+            } else {
+                stderr.trim().to_string()
+            };
+            Err(GitError::Git(err_msg))
+        }
+    }
 
     pub fn fetch(&self) -> Result<(), GitError> {
-        let (remote_name, remote_branch, has_upstream) = self.resolve_upstream_or_fallback()?;
-        let mut remote = self.repo.find_remote(&remote_name)?;
-        if has_upstream {
-            let refspec =
-                format!("refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
-            remote.fetch(&[&refspec], None, None)?;
-        } else {
-            remote.fetch(&[] as &[&str], None, None)?;
-        }
+        self.run_git_command(&["fetch", "--prune"])?;
         Ok(())
     }
 
     pub fn pull(&self) -> Result<(), GitError> {
-        let head = self.repo.head()?;
-        if !head.is_branch() {
-            return Err(GitError::Git("Cannot pull from detached HEAD".to_string()));
-        }
-        let branch_name = head.shorthand()?;
-        let (remote_name, remote_branch, _has_upstream) = self.resolve_upstream_or_fallback()?;
-        let mut remote = self.repo.find_remote(&remote_name)?;
-        let refspec =
-            format!("refs/heads/{remote_branch}:refs/remotes/{remote_name}/{remote_branch}");
-        remote.fetch(&[&refspec], None, None)?;
-        let remote_ref_name = format!("refs/remotes/{remote_name}/{remote_branch}");
-        let remote_ref = self.repo.find_reference(&remote_ref_name)?;
-        let remote_commit = remote_ref.peel_to_commit()?;
-        let refname = format!("refs/heads/{}", branch_name);
-        let mut local_ref = self.repo.find_reference(&refname)?;
-        let local_commit = local_ref.peel_to_commit()?;
-        let ancestor = self
-            .repo
-            .merge_base(local_commit.id(), remote_commit.id())?;
-        if ancestor == remote_commit.id() {
-            return Ok(());
-        }
-        if ancestor != local_commit.id() {
-            return Err(GitError::Git(
-                "Local and remote histories have diverged. Requires explicit merge or rebase."
-                    .to_string(),
-            ));
-        }
-
-        let mut status_opts = StatusOptions::new();
-        status_opts.include_untracked(true);
-        status_opts.renames_head_to_index(true);
-        status_opts.renames_index_to_workdir(true);
-        if !self.repo.statuses(Some(&mut status_opts))?.is_empty() {
-            return Err(GitError::Git(
-                "Cannot fast-forward pull with uncommitted changes".to_string(),
-            ));
-        }
-
-        let tree = self.repo.find_commit(remote_commit.id())?.tree()?;
-        let mut checkout_opts = git2::build::CheckoutBuilder::new();
-        checkout_opts.force();
-        self.repo
-            .checkout_tree(tree.as_object(), Some(&mut checkout_opts))?;
-        local_ref.set_target(remote_commit.id(), "pull: Fast-forward")?;
+        self.run_git_command(&["pull", "--ff-only"])?;
         Ok(())
     }
 
     pub fn push(&self) -> Result<(), GitError> {
-        let head = self.repo.head()?;
-        if !head.is_branch() {
-            return Err(GitError::Git("Cannot push from detached HEAD".to_string()));
-        }
-        let branch_name = head.shorthand()?;
-        let (remote_name, remote_branch, _has_upstream) = self.resolve_upstream_or_fallback()?;
-        let refspec = format!("refs/heads/{}:refs/heads/{}", branch_name, remote_branch);
-        let mut remote = self.repo.find_remote(&remote_name)?;
-        remote.push(&[&refspec], None)?;
+        self.run_git_command(&["push"])?;
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn remote_callbacks(&self) -> Result<RemoteCallbacks<'static>, GitError> {
+        let mut callbacks = RemoteCallbacks::new();
+
+        let stored_passphrase: Option<String> =
+            crate::auth::credentials::load_credentials().git_ssh_passphrase;
+
+        callbacks.credentials(move |url, username_from_url, allowed_types| {
+            if allowed_types.is_username() {
+                return Cred::username(username_from_url.unwrap_or("git"));
+            }
+
+            if allowed_types.is_ssh_key()
+                || allowed_types.is_ssh_memory()
+                || allowed_types.is_ssh_custom()
+            {
+                let username = username_from_url.unwrap_or("git");
+                if let Ok(cred) = Cred::ssh_key_from_agent(username) {
+                    return Ok(cred);
+                }
+
+                if let Some(home) = std::env::var_os("HOME") {
+                    let ssh_dir = std::path::Path::new(&home).join(".ssh");
+                    let key_candidates = ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"];
+                    for candidate in key_candidates {
+                        let private_key = ssh_dir.join(candidate);
+                        let public_key = ssh_dir.join(format!("{candidate}.pub"));
+                        if private_key.exists() {
+                            let public_key_opt =
+                                public_key.exists().then_some(public_key.as_path());
+                            let passphrase = stored_passphrase.clone();
+
+                            return Cred::ssh_key(
+                                username,
+                                public_key_opt,
+                                &private_key,
+                                passphrase.as_deref(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            if allowed_types.is_user_pass_plaintext() {
+                if let Ok(cred) = git_credential_helper(url, username_from_url) {
+                    return Ok(cred);
+                }
+            }
+
+            Err(git2::Error::from_str(
+                "No usable Git credentials found; load your SSH key into ssh-agent or use an unencrypted key",
+            ))
+        });
+
+        callbacks.transfer_progress(|stats| {
+            tracing::debug!(
+                received_objects = stats.received_objects(),
+                total_objects = stats.total_objects(),
+                "Git transfer progress"
+            );
+            true
+        });
+
+        Ok(callbacks)
+    }
+
+    #[allow(dead_code)]
+    fn remote_fetch_options(&self) -> Result<FetchOptions<'static>, GitError> {
+        let mut options = FetchOptions::new();
+        options.remote_callbacks(self.remote_callbacks()?);
+        Ok(options)
+    }
+
+    #[allow(dead_code)]
+    fn remote_push_options(&self) -> Result<PushOptions<'static>, GitError> {
+        let mut options = PushOptions::new();
+        options.remote_callbacks(self.remote_callbacks()?);
+        Ok(options)
     }
 
     pub fn signature(&self) -> Result<git2::Signature<'static>, GitError> {
@@ -1375,6 +1495,23 @@ impl GitRepo {
             .checkout_tree(commit.as_object(), Some(&mut opts))?;
 
         self.repo.set_head(&refname)?;
+        Ok(())
+    }
+
+    pub fn checkout_remote_branch(
+        &self,
+        local_name: &str,
+        remote_name: &str,
+    ) -> Result<(), GitError> {
+        let remote_branch = self
+            .repo
+            .find_branch(remote_name, git2::BranchType::Remote)?;
+        let target_commit = remote_branch.get().peel_to_commit()?;
+
+        let mut local_branch = self.repo.branch(local_name, &target_commit, false)?;
+        local_branch.set_upstream(Some(remote_name))?;
+
+        self.checkout_branch(local_name)?;
         Ok(())
     }
 
@@ -1492,18 +1629,154 @@ fn secs_to_system_time(secs: i64) -> SystemTime {
     }
 }
 
-fn parse_tag_name_version(tag: &str) -> (u64, u64, u64) {
+fn parse_tag_name_version(tag: &str) -> (u64, u64, u64, Option<String>) {
     let stripped = tag.strip_prefix('v').unwrap_or(tag);
     let mut parts = stripped.split('.');
-    let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let patch = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (major, minor, patch)
+
+    let parse_part = |s: &str| -> u64 {
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok().unwrap_or(0)
+    };
+
+    let major = parts.next().map(parse_part).unwrap_or(0);
+    let minor = parts.next().map(parse_part).unwrap_or(0);
+    let patch_str = parts.next().unwrap_or("0");
+    let patch_digits: String = patch_str
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let patch = patch_digits.parse().ok().unwrap_or(0);
+
+    let prerelease = patch_str
+        .chars()
+        .position(|c| !c.is_ascii_digit())
+        .map(|pos| patch_str[pos..].to_string());
+
+    (major, minor, patch, prerelease)
+}
+
+#[allow(dead_code)]
+fn normalize_git_url(url_str: &str) -> String {
+    if url_str.contains("://") {
+        return url_str.to_string();
+    }
+    if let Some(colon_idx) = url_str.find(':') {
+        let host_part = &url_str[..colon_idx];
+        let path_part = &url_str[colon_idx + 1..];
+        if !host_part.contains('/') {
+            if let Some(at_idx) = host_part.find('@') {
+                let user = &host_part[..at_idx];
+                let host = &host_part[at_idx + 1..];
+                return format!("ssh://{}@{}/{}", user, host, path_part);
+            } else {
+                return format!("ssh://{}/{}", host_part, path_part);
+            }
+        }
+    }
+    url_str.to_string()
+}
+
+#[allow(dead_code)]
+fn fill_git_credentials(
+    url_str: &str,
+    username: Option<&str>,
+) -> Result<(String, String), git2::Error> {
+    let normalized = normalize_git_url(url_str);
+    let url_parsed = url::Url::parse(&normalized)
+        .map_err(|e| git2::Error::from_str(&format!("failed to parse URL: {}", e)))?;
+
+    let scheme = url_parsed.scheme();
+    if scheme != "http" && scheme != "https" && scheme != "ssh" {
+        return Err(git2::Error::from_str(
+            "Git credential helper is only supported for HTTP, HTTPS, and SSH URLs",
+        ));
+    }
+
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .args(["credential", "fill"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| git2::Error::from_str(&format!("failed to spawn git credential: {}", e)))?;
+
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "protocol={}", url_parsed.scheme()).ok();
+        writeln!(stdin, "host={}", url_parsed.host_str().unwrap_or("")).ok();
+        let path = url_parsed.path().trim_start_matches('/');
+        if !path.is_empty() {
+            writeln!(stdin, "path={}", path).ok();
+        }
+        if let Some(user) = username {
+            writeln!(stdin, "username={}", user).ok();
+        } else if !url_parsed.username().is_empty() {
+            writeln!(stdin, "username={}", url_parsed.username()).ok();
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| git2::Error::from_str(&format!("failed to wait for git credential: {}", e)))?;
+
+    if !output.status.success() {
+        return Err(git2::Error::from_str("git credential helper failed"));
+    }
+
+    let mut out_username = String::new();
+    let mut out_password = String::new();
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    for line in stdout_str.lines() {
+        if let Some(val) = line.strip_prefix("username=") {
+            out_username = val.to_string();
+        } else if let Some(val) = line.strip_prefix("password=") {
+            out_password = val.to_string();
+        }
+    }
+
+    Ok((out_username, out_password))
+}
+
+#[allow(dead_code)]
+fn git_credential_helper(url_str: &str, username: Option<&str>) -> Result<Cred, git2::Error> {
+    let (out_username, out_password) = fill_git_credentials(url_str, username)?;
+
+    if !out_password.is_empty() {
+        let user = if out_username.is_empty() {
+            username.unwrap_or("git").to_string()
+        } else {
+            out_username
+        };
+        Cred::userpass_plaintext(&user, &out_password)
+    } else {
+        Err(git2::Error::from_str("no credentials returned from helper"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_git_url() {
+        assert_eq!(
+            normalize_git_url("git@github.com:parazeeknova/palimpsest"),
+            "ssh://git@github.com/parazeeknova/palimpsest"
+        );
+        assert_eq!(
+            normalize_git_url("github.com:parazeeknova/palimpsest"),
+            "ssh://github.com/parazeeknova/palimpsest"
+        );
+        assert_eq!(
+            normalize_git_url("ssh://git@github.com/parazeeknova/palimpsest"),
+            "ssh://git@github.com/parazeeknova/palimpsest"
+        );
+        assert_eq!(
+            normalize_git_url("https://github.com/parazeeknova/palimpsest"),
+            "https://github.com/parazeeknova/palimpsest"
+        );
+    }
 
     fn init_temp_repo(prefix: &str) -> (std::path::PathBuf, git2::Repository) {
         let temp_dir = std::env::temp_dir().join(format!(
@@ -1709,5 +1982,26 @@ mod tests {
 
         drop(repo);
         std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_derive_clone_destination() {
+        let temp_dir = std::env::temp_dir();
+        let temp_dir_str = temp_dir.to_str().unwrap();
+
+        let dst1 = derive_clone_destination("https://github.com/user/repo.git", temp_dir_str);
+        assert_eq!(dst1.file_name().unwrap().to_str().unwrap(), "repo");
+
+        let dst2 = derive_clone_destination("git@github.com:user/repo.git", temp_dir_str);
+        assert_eq!(dst2.file_name().unwrap().to_str().unwrap(), "repo");
+
+        let dst3 = derive_clone_destination("ssh://git@github.com/user/repo.git", temp_dir_str);
+        assert_eq!(dst3.file_name().unwrap().to_str().unwrap(), "repo");
+
+        let dst4 = derive_clone_destination("host-alias:user/repo.git", temp_dir_str);
+        assert_eq!(dst4.file_name().unwrap().to_str().unwrap(), "repo");
+
+        let dst5 = derive_clone_destination("host-alias:repo.git", temp_dir_str);
+        assert_eq!(dst5.file_name().unwrap().to_str().unwrap(), "repo");
     }
 }

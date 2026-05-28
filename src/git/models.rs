@@ -51,6 +51,8 @@ pub struct Branch {
     pub is_remote: bool,
     pub upstream: Option<String>,
     pub tip_hash: String,
+    pub ahead: Option<usize>,
+    pub behind: Option<usize>,
 }
 
 #[allow(dead_code)]
@@ -118,6 +120,8 @@ mod tests {
             is_remote: false,
             upstream: None,
             tip_hash: "abc".to_string(),
+            ahead: None,
+            behind: None,
         };
         assert!(branch.is_current);
         assert!(!branch.is_remote);

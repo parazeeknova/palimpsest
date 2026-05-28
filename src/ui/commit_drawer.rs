@@ -38,9 +38,9 @@ pub enum CommitDrawerTab {
 
 pub struct State {
     pub tab: CommitDrawerTab,
-    pub tree_state: crate::ui::filetree::TreeState,
+    pub tree_state: crate::ui::core::filetree::TreeState,
     diff_state: cdv::DiffTimelineState,
-    pub cached_tree_items: Vec<crate::ui::filetree::FileTreeItem>,
+    pub cached_tree_items: Vec<crate::ui::core::filetree::FileTreeItem>,
     pub last_rebuild_key: Option<String>,
     pub height: f32,
     pub detached: bool,
@@ -50,7 +50,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             tab: CommitDrawerTab::Commit,
-            tree_state: crate::ui::filetree::TreeState::default(),
+            tree_state: crate::ui::core::filetree::TreeState::default(),
             diff_state: cdv::DiffTimelineState::default(),
             cached_tree_items: Vec::new(),
             last_rebuild_key: None,
@@ -224,14 +224,14 @@ pub fn show(
                         if state.last_rebuild_key.as_deref() != Some(rebuild_key) {
                             state.cached_tree_items = files
                                 .iter()
-                                .map(|f| crate::ui::filetree::FileTreeItem {
+                                .map(|f| crate::ui::core::filetree::FileTreeItem {
                                     path: f.path.clone(),
                                     change_kind: Some(f.kind.clone()),
                                 })
                                 .collect();
                             state.last_rebuild_key = Some(rebuild_key.to_string());
                         }
-                        crate::ui::filetree::paint_tree_tab(
+                        crate::ui::core::filetree::paint_tree_tab(
                             ui,
                             &mut state.tree_state,
                             &state.cached_tree_items,
@@ -320,7 +320,7 @@ fn paint_changes_tab(
             diff_state,
             Some(diff),
             Some(&mut |ui, rect, path, _kind, color| {
-                crate::ui::filetree::paint_file_icon_rect(ui, rect, path, color);
+                crate::ui::core::filetree::paint_file_icon_rect(ui, rect, path, color);
             }),
         );
     } else {
@@ -533,7 +533,7 @@ fn paint_change_row(ui: &mut egui::Ui, file: &FileStatus) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(13.0, 13.0), egui::Sense::hover());
-        crate::ui::filetree::paint_file_icon_rect(ui, rect, &file.path, icon_color);
+        crate::ui::core::filetree::paint_file_icon_rect(ui, rect, &file.path, icon_color);
         ui.label(egui::RichText::new(&file.path).size(10.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(

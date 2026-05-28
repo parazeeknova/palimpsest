@@ -7,13 +7,16 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use palimpsest::git::GitRepo;
 use palimpsest::git::live::{RepoLiveEvent, RepoLocalSnapshot, RepoOwnership, RepoRemoteSnapshot};
 use palimpsest::logger::LogBuffer;
-use palimpsest::state::{AppAction, AppStore, BranchAction, CommitAction, StashAction};
+use palimpsest::state::{
+    AppAction, AppStore, BranchAction, CommitAction, RepoSidebarStates, StashAction,
+};
 use palimpsest::ui::command_palette::{PaletteResult, QuickLaunchAction};
-use palimpsest::ui::repo_manager::RepoOwnershipFilterLabel;
-use palimpsest::ui::repo_manager_sidebar;
+use palimpsest::ui::core::passphrase_prompt::{PassphrasePromptAction, PassphrasePromptState};
+use palimpsest::ui::repo_manager;
+use palimpsest::ui::repo_manager::repo_manager_sidebar;
 use palimpsest::ui::{
-    body, command_palette, commit_panel, profile_panel, repo_manager_body, setup_wizard, sidebar,
-    tabbar, titlebar, toolbar,
+    body, command_palette, commit_panel, core::setup_wizard, profile_panel,
+    repo_manager::repo_manager_body, sidebar, tabbar, titlebar, toolbar,
 };
 
 fn primary_modifiers() -> egui::Modifiers {
@@ -74,6 +77,14 @@ struct PalimpsestApp {
     search_query: String,
     debug_open: bool,
     show_command_palette: bool,
+    quick_launch_busy: Option<QuickLaunchAction>,
+    passphrase_prompt_state: PassphrasePromptState,
+    pending_passphrase_action: Option<QuickLaunchAction>,
+    pending_passphrase_repo_path: Option<String>,
+    quick_launch_tx: Sender<QuickLaunchAction>,
+    quick_launch_rx: Receiver<QuickLaunchAction>,
+    background_ui_tx: Sender<BackgroundUiEvent>,
+    background_ui_rx: Receiver<BackgroundUiEvent>,
     git_repo: Option<GitRepo>,
     body_state: body::State,
     commit_panel_state: commit_panel::State,
@@ -120,6 +131,16 @@ struct RepoLiveState {
 struct RepoTrackerHandle {
     stop: Arc<AtomicBool>,
     watch_tx: std::sync::mpsc::Sender<palimpsest::git::live::WatchEvent>,
+}
+
+enum BackgroundUiEvent {
+    QuickLaunchComplete(QuickLaunchAction),
+    OpenPassphrasePrompt {
+        repo_path: String,
+        key_path: String,
+        action: QuickLaunchAction,
+    },
+    TriggerForceRefresh,
 }
 
 impl PalimpsestApp {
@@ -178,6 +199,8 @@ impl PalimpsestApp {
         tracing::info!("Application initialized");
 
         let (repo_live_tx, repo_live_rx) = mpsc::channel();
+        let (quick_launch_tx, quick_launch_rx) = mpsc::channel();
+        let (background_ui_tx, background_ui_rx) = mpsc::channel();
 
         let mut app = Self {
             store,
@@ -186,6 +209,14 @@ impl PalimpsestApp {
             search_query: String::new(),
             debug_open: false,
             show_command_palette: false,
+            quick_launch_busy: None,
+            passphrase_prompt_state: PassphrasePromptState::default(),
+            pending_passphrase_action: None,
+            pending_passphrase_repo_path: None,
+            quick_launch_tx,
+            quick_launch_rx,
+            background_ui_tx,
+            background_ui_rx,
             git_repo: None,
             body_state: body::State::default(),
             commit_panel_state: commit_panel::State::default(),
@@ -409,6 +440,18 @@ impl PalimpsestApp {
                         });
                         self.store
                             .dispatch(AppAction::SetGitHubError(snapshot.github_error.clone()));
+                        changed = true;
+                    }
+                }
+                RepoLiveEvent::RemoteSyncCompleted { path, generation } => {
+                    let Some(entry) = self.repo_live_states.get_mut(&path) else {
+                        continue;
+                    };
+                    if entry.generation != generation {
+                        continue;
+                    }
+                    if self.store.get_state().current_repo.as_deref() == Some(&path) {
+                        self.store.dispatch(AppAction::SetGitHubLoading(false));
                         changed = true;
                     }
                 }
@@ -702,6 +745,43 @@ impl PalimpsestApp {
         }
     }
 
+    fn finish_quick_launch(&mut self) {
+        self.quick_launch_busy = None;
+    }
+
+    fn process_quick_launch_updates(&mut self) {
+        while let Ok(action) = self.quick_launch_rx.try_recv() {
+            if self.quick_launch_busy.as_ref() == Some(&action) {
+                tracing::info!(?action, "Quick launch action completed");
+                self.finish_quick_launch();
+            }
+        }
+
+        while let Ok(event) = self.background_ui_rx.try_recv() {
+            match event {
+                BackgroundUiEvent::QuickLaunchComplete(action) => {
+                    if self.quick_launch_busy.as_ref() == Some(&action) {
+                        self.finish_quick_launch();
+                    }
+                }
+                BackgroundUiEvent::TriggerForceRefresh => {
+                    self.trigger_tracker_refresh();
+                }
+                BackgroundUiEvent::OpenPassphrasePrompt {
+                    repo_path,
+                    key_path,
+                    action,
+                } => {
+                    self.passphrase_prompt_state.open = true;
+                    self.passphrase_prompt_state.key_path = key_path;
+                    self.pending_passphrase_action = Some(action);
+                    self.pending_passphrase_repo_path = Some(repo_path);
+                    self.quick_launch_busy = None;
+                }
+            }
+        }
+    }
+
     fn handle_commit_action(&mut self, action: CommitAction) {
         let Some(repo) = &self.git_repo else {
             return;
@@ -776,7 +856,7 @@ impl PalimpsestApp {
             .dispatch(AppAction::SetRepoError(Some(msg.to_string())));
 
         let ctx = ctx.clone();
-        self.run_background_git_job(ctx, move |repo| match action {
+        self.run_background_git_job(ctx, None, move |repo| match action {
             StashAction::Save(msg) => repo.stash_save(msg.as_deref()),
             StashAction::Pop(idx) => repo.stash_pop(idx),
             StashAction::Apply(idx) => repo.stash_apply(idx),
@@ -796,12 +876,21 @@ impl PalimpsestApp {
             BranchAction::CreateAndCheckout(name) => {
                 format!("Creating and checking out branch {}...", name)
             }
+            BranchAction::CheckoutRemote {
+                local_name,
+                remote_name,
+            } => {
+                format!(
+                    "Checking out remote branch {} as {}...",
+                    remote_name, local_name
+                )
+            }
         };
         self.store
             .dispatch(AppAction::SetRepoError(Some(msg.to_string())));
 
         let ctx = ctx.clone();
-        self.run_background_git_job(ctx, move |repo| match action {
+        self.run_background_git_job(ctx, None, move |repo| match action {
             BranchAction::Create(name) => repo.create_branch(&name),
             BranchAction::Checkout(name) => repo.checkout_branch(&name),
             BranchAction::Delete(name) => repo.delete_branch(&name),
@@ -809,6 +898,10 @@ impl PalimpsestApp {
                 repo.create_branch(&name)?;
                 repo.checkout_branch(&name)
             }
+            BranchAction::CheckoutRemote {
+                local_name,
+                remote_name,
+            } => repo.checkout_remote_branch(&local_name, &remote_name),
         });
     }
 
@@ -828,22 +921,60 @@ impl PalimpsestApp {
             QuickLaunchAction::OpenLogs => {
                 self.debug_open = true;
             }
+            QuickLaunchAction::NextTab => {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let next_index = (index + 1) % state.open_tabs.len();
+                        self.activate_tab(next_index);
+                    }
+                }
+            }
+            QuickLaunchAction::PreviousTab => {
+                let state = self.store.get_state();
+                if !state.open_tabs.is_empty() {
+                    if let Some(index) = state.active_tab {
+                        let prev_index =
+                            (index + state.open_tabs.len() - 1) % state.open_tabs.len();
+                        self.activate_tab(prev_index);
+                    }
+                }
+            }
             QuickLaunchAction::Fetch => {
-                self.store
-                    .dispatch(AppAction::SetRepoError(Some("Fetching...".to_string())));
-                self.run_background_git_job(ctx.clone(), |repo| repo.fetch());
+                if self.quick_launch_busy.is_some() {
+                    return;
+                }
+                tracing::info!("Quick launch: fetch");
+                self.quick_launch_busy = Some(QuickLaunchAction::Fetch);
+                self.pending_passphrase_action = Some(QuickLaunchAction::Fetch);
+                self.run_background_git_job(ctx.clone(), Some(QuickLaunchAction::Fetch), |repo| {
+                    repo.fetch()
+                });
             }
             QuickLaunchAction::Pull => {
-                self.store
-                    .dispatch(AppAction::SetRepoError(Some("Pulling...".to_string())));
-                self.run_background_git_job(ctx.clone(), |repo| repo.pull());
+                if self.quick_launch_busy.is_some() {
+                    return;
+                }
+                tracing::info!("Quick launch: pull");
+                self.quick_launch_busy = Some(QuickLaunchAction::Pull);
+                self.pending_passphrase_action = Some(QuickLaunchAction::Pull);
+                self.run_background_git_job(ctx.clone(), Some(QuickLaunchAction::Pull), |repo| {
+                    repo.pull()
+                });
             }
             QuickLaunchAction::Push => {
-                self.store
-                    .dispatch(AppAction::SetRepoError(Some("Pushing...".to_string())));
-                self.run_background_git_job(ctx.clone(), |repo| repo.push());
+                if self.quick_launch_busy.is_some() {
+                    return;
+                }
+                tracing::info!("Quick launch: push");
+                self.quick_launch_busy = Some(QuickLaunchAction::Push);
+                self.pending_passphrase_action = Some(QuickLaunchAction::Push);
+                self.run_background_git_job(ctx.clone(), Some(QuickLaunchAction::Push), |repo| {
+                    repo.push()
+                });
             }
             QuickLaunchAction::StageAll => {
+                tracing::info!("Quick launch: stage all");
                 if let Some(repo) = &self.git_repo {
                     match repo.stage_all() {
                         Ok(()) => self.refresh_git_data(),
@@ -851,7 +982,17 @@ impl PalimpsestApp {
                     }
                 }
             }
+            QuickLaunchAction::UnstageAll => {
+                tracing::info!("Quick launch: unstage all");
+                if let Some(repo) = &self.git_repo {
+                    match repo.unstage_all() {
+                        Ok(()) => self.refresh_git_data(),
+                        Err(e) => tracing::error!(error = %e, "Failed to unstage all"),
+                    }
+                }
+            }
             QuickLaunchAction::DiscardAll => {
+                tracing::info!("Quick launch: discard all");
                 if let Some(repo) = &self.git_repo {
                     match repo.discard_all() {
                         Ok(()) => self.refresh_git_data(),
@@ -860,17 +1001,59 @@ impl PalimpsestApp {
                 }
             }
             QuickLaunchAction::CreateBranch => {
+                tracing::info!("Quick launch: create branch");
                 self.show_create_branch_dialog = true;
                 self.new_branch_name.clear();
+            }
+            QuickLaunchAction::CreateTag => {
+                tracing::info!("Quick launch: create tag");
+                self.show_create_tag_dialog = true;
+                self.new_tag_name.clear();
+            }
+            QuickLaunchAction::SaveStash => {
+                tracing::info!("Quick launch: save stash");
+                self.show_save_stash_dialog = true;
+                self.new_stash_message.clear();
+            }
+            QuickLaunchAction::CheckoutBranch(name) => {
+                tracing::info!(branch = %name, "Quick launch: checkout branch");
+                self.handle_branch_action(BranchAction::Checkout(name), ctx);
+            }
+            QuickLaunchAction::DeleteBranch(name) => {
+                tracing::info!(branch = %name, "Quick launch: delete branch");
+                self.handle_branch_action(BranchAction::Delete(name), ctx);
+            }
+            QuickLaunchAction::ApplyStash(idx) => {
+                tracing::info!(index = idx, "Quick launch: apply stash");
+                self.handle_stash_action(StashAction::Apply(idx), ctx);
+            }
+            QuickLaunchAction::PopStash(idx) => {
+                tracing::info!(index = idx, "Quick launch: pop stash");
+                self.handle_stash_action(StashAction::Pop(idx), ctx);
+            }
+            QuickLaunchAction::DropStash(idx) => {
+                tracing::info!(index = idx, "Quick launch: drop stash");
+                self.handle_stash_action(StashAction::Drop(idx), ctx);
+            }
+            QuickLaunchAction::Refresh => {
+                tracing::info!("Quick launch: refresh");
+                self.refresh_git_data();
+                self.trigger_tracker_refresh();
             }
         }
     }
 
-    fn run_background_git_job<F>(&self, ctx: egui::Context, f: F)
-    where
+    fn run_background_git_job<F>(
+        &self,
+        ctx: egui::Context,
+        completion: Option<QuickLaunchAction>,
+        f: F,
+    ) where
         F: FnOnce(&GitRepo) -> Result<(), palimpsest::git::error::GitError> + Send + 'static,
     {
         let store = self.store.clone();
+        let completion_tx = self.quick_launch_tx.clone();
+        let background_ui_tx = self.background_ui_tx.clone();
         let current_repo_path = match store.get_state().current_repo.clone() {
             Some(path) => path,
             None => return,
@@ -880,6 +1063,7 @@ impl PalimpsestApp {
             let repo = match GitRepo::open(&current_repo_path) {
                 Ok(r) => r,
                 Err(e) => {
+                    tracing::error!(path = %current_repo_path, error = %e, "Failed to open repo for git job");
                     if store.get_state().current_repo.as_ref() == Some(&current_repo_path) {
                         store.dispatch(AppAction::SetRepoError(Some(format!(
                             "Failed to open repo: {}",
@@ -887,88 +1071,60 @@ impl PalimpsestApp {
                         ))));
                         ctx.request_repaint();
                     }
+                    if let Some(action) = completion {
+                        let _ = completion_tx.send(action);
+                    }
                     return;
                 }
             };
 
             if let Err(e) = f(&repo) {
+                tracing::error!(path = %current_repo_path, error = %e, "Git job failed");
                 if store.get_state().current_repo.as_ref() == Some(&current_repo_path) {
+                    let error_text = e.to_string();
+                    if error_text.contains("passphrase") || error_text.contains("credential") {
+                        if let Some(action) = completion {
+                            let key_path = std::env::var("HOME")
+                                .ok()
+                                .and_then(|home| {
+                                    let ssh_dir = std::path::Path::new(&home).join(".ssh");
+                                    ["id_ed25519", "id_rsa", "id_ecdsa", "id_dsa"]
+                                        .iter()
+                                        .map(|name| ssh_dir.join(name))
+                                        .find(|p| p.exists())
+                                        .map(|p| p.to_string_lossy().to_string())
+                                })
+                                .unwrap_or_default();
+                            let _ =
+                                background_ui_tx.send(BackgroundUiEvent::OpenPassphrasePrompt {
+                                    repo_path: current_repo_path.clone(),
+                                    key_path,
+                                    action,
+                                });
+                        }
+                        ctx.request_repaint();
+                        return;
+                    }
                     store.dispatch(AppAction::SetRepoError(Some(e.to_string())));
                     ctx.request_repaint();
+                }
+                if let Some(action) = completion {
+                    let _ = completion_tx.send(action);
                 }
                 return;
             }
 
-            let mut errors = Vec::new();
-            let commits = match repo.commits(Some(200)) {
-                Ok(c) => c,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let branches = match repo.branches() {
-                Ok(b) => b,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let remotes = match repo.remotes() {
-                Ok(r) => r,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let tags = match repo.tags() {
-                Ok(t) => t,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let stashes = match repo.stashes() {
-                Ok(s) => s,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    Vec::new()
-                }
-            };
-            let status = match repo.status() {
-                Ok(s) => s,
-                Err(e) => {
-                    errors.push(e.to_string());
-                    palimpsest::git::models::RepoStatus {
-                        branch: "HEAD".to_string(),
-                        staged_count: 0,
-                        unstaged_count: 0,
-                        staged_files: Vec::new(),
-                        unstaged_files: Vec::new(),
-                        additions: 0,
-                        deletions: 0,
-                        files_changed: 0,
-                    }
-                }
-            };
-
             if store.get_state().current_repo.as_ref() == Some(&current_repo_path) {
-                store.dispatch(AppAction::RefreshGitData {
-                    commits,
-                    branches,
-                    remotes,
-                    tags,
-                    stashes,
-                    status,
-                });
-
-                if errors.is_empty() {
-                    store.dispatch(AppAction::SetRepoError(None));
-                } else {
-                    store.dispatch(AppAction::SetRepoError(Some(errors.join("; "))));
-                }
-
+                store.dispatch(AppAction::SetRepoError(None));
                 ctx.request_repaint();
+            }
+            let _ = background_ui_tx.send(BackgroundUiEvent::TriggerForceRefresh);
+
+            if let Some(action) = completion {
+                let action_for_ui = action.clone();
+                let _ =
+                    background_ui_tx.send(BackgroundUiEvent::QuickLaunchComplete(action_for_ui));
+                let _ = completion_tx.send(action);
             }
         });
     }
@@ -1686,6 +1842,7 @@ impl eframe::App for PalimpsestApp {
         }
 
         self.process_repo_live_updates(ui.ctx());
+        self.process_quick_launch_updates();
 
         let state = self.store.get_state();
         let current_login = state.github_user.as_ref().map(|user| user.login.clone());
@@ -2144,6 +2301,7 @@ impl eframe::App for PalimpsestApp {
             &state,
             self.current_repo_owned_by_authed_user,
             self.body_state.layout,
+            self.quick_launch_busy.clone(),
         );
         let ctx = ui.ctx().clone();
 
@@ -2201,15 +2359,64 @@ impl eframe::App for PalimpsestApp {
             self.show_command_palette = true;
         }
 
+        if self.passphrase_prompt_state.open {
+            let prompt_action = palimpsest::ui::core::passphrase_prompt::show(
+                ui,
+                &mut self.passphrase_prompt_state,
+            );
+            match prompt_action {
+                PassphrasePromptAction::Submit {
+                    passphrase,
+                    remember,
+                } => {
+                    let save_result = palimpsest::auth::credentials::save_git_ssh_passphrase(Some(
+                        passphrase.clone(),
+                    ));
+                    if let Err(error) = save_result {
+                        tracing::error!(error = %error, "Failed to save SSH passphrase");
+                        self.store.dispatch(AppAction::SetRepoError(Some(error)));
+                    } else if let Some(action) = self.pending_passphrase_action.clone() {
+                        self.passphrase_prompt_state.open = false;
+                        self.passphrase_prompt_state.passphrase.clear();
+                        self.quick_launch_busy = None;
+                        self.pending_passphrase_action = None;
+                        self.pending_passphrase_repo_path = None;
+                        self.handle_quick_launch_action(action, ui.ctx());
+                        if !remember {
+                            let _ = palimpsest::auth::credentials::save_git_ssh_passphrase(None);
+                        }
+                    }
+                }
+                PassphrasePromptAction::Cancel => {
+                    self.passphrase_prompt_state.open = false;
+                    self.passphrase_prompt_state.passphrase.clear();
+                    self.pending_passphrase_action = None;
+                    self.pending_passphrase_repo_path = None;
+                    self.quick_launch_busy = None;
+                }
+                PassphrasePromptAction::None => {}
+            }
+        }
+
         if self.show_command_palette {
             let ctx = ui.ctx().clone();
             match command_palette::show(
                 &ctx,
                 &mut self.command_palette_state,
+                &state,
                 self.git_repo.is_some(),
+                self.quick_launch_busy.as_ref(),
             ) {
                 PaletteResult::Action(a) => {
-                    self.show_command_palette = false;
+                    let keep_open = matches!(
+                        a,
+                        QuickLaunchAction::Fetch
+                            | QuickLaunchAction::Pull
+                            | QuickLaunchAction::Push
+                    );
+                    if !keep_open {
+                        self.show_command_palette = false;
+                    }
                     let ctx = ui.ctx().clone();
                     self.handle_quick_launch_action(a, &ctx);
                 }
@@ -2253,10 +2460,14 @@ impl eframe::App for PalimpsestApp {
                 egui::KeyboardShortcut::new(command.plus(egui::Modifiers::ALT), egui::Key::O);
             let open_console_shortcut =
                 egui::KeyboardShortcut::new(command.plus(egui::Modifiers::ALT), egui::Key::T);
-            let next_tab_shortcut =
-                egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::Tab);
+            let tab_modifier = if cfg!(target_os = "macos") {
+                egui::Modifiers::CTRL
+            } else {
+                command
+            };
+            let next_tab_shortcut = egui::KeyboardShortcut::new(tab_modifier, egui::Key::Tab);
             let prev_tab_shortcut = egui::KeyboardShortcut::new(
-                egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT),
+                tab_modifier.plus(egui::Modifiers::SHIFT),
                 egui::Key::Tab,
             );
 
@@ -2406,7 +2617,7 @@ impl eframe::App for PalimpsestApp {
                         .max_rect(sidebar_rect)
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                     |ui| {
-                        repo_manager_sidebar::show(
+                        repo_manager::repo_manager_sidebar::show(
                             ui,
                             &mut self.manager_sidebar_state,
                             &state,
@@ -2417,12 +2628,12 @@ impl eframe::App for PalimpsestApp {
                 .inner
             {
                 match action {
-                    repo_manager_sidebar::ManagerSidebarAction::SelectRepo(path) => {
+                    repo_manager::repo_manager_sidebar::ManagerSidebarAction::SelectRepo(path) => {
                         self.store
                             .dispatch(AppAction::SelectManagerRepo(Some(path.clone())));
                         self.fetch_manager_details(&path);
                     }
-                    repo_manager_sidebar::ManagerSidebarAction::SetFilter(filter) => {
+                    repo_manager::repo_manager_sidebar::ManagerSidebarAction::SetFilter(filter) => {
                         self.manager_repo_filter = filter;
                         tracing::info!(filter = ?self.manager_repo_filter, "Updated manager repo filter");
                         self.persist_session();
@@ -2437,19 +2648,19 @@ impl eframe::App for PalimpsestApp {
                         .max_rect(body_rect)
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                     |ui| {
-                        repo_manager_body::show(
+                        repo_manager::repo_manager_body::show(
                             ui,
                             &mut self.manager_body_state,
                             &state,
                             match self.manager_repo_filter {
-                                repo_manager_sidebar::RepoOwnershipFilter::All => {
-                                    RepoOwnershipFilterLabel::All
+                                repo_manager::repo_manager_sidebar::RepoOwnershipFilter::All => {
+                                    repo_manager::RepoOwnershipFilterLabel::All
                                 }
-                                repo_manager_sidebar::RepoOwnershipFilter::Owned => {
-                                    RepoOwnershipFilterLabel::Owned
+                                repo_manager::repo_manager_sidebar::RepoOwnershipFilter::Owned => {
+                                    repo_manager::RepoOwnershipFilterLabel::Owned
                                 }
-                                repo_manager_sidebar::RepoOwnershipFilter::External => {
-                                    RepoOwnershipFilterLabel::External
+                                repo_manager::repo_manager_sidebar::RepoOwnershipFilter::External => {
+                                    repo_manager::RepoOwnershipFilterLabel::External
                                 }
                             },
                         )
@@ -2460,6 +2671,35 @@ impl eframe::App for PalimpsestApp {
                 self.open_repo(&open_path);
             }
         } else {
+            // Load repo states from state manager if repo path changed
+            if let Some(ref path) = state.current_repo {
+                if self.sidebar_state.last_loaded_repo_path.as_ref() != Some(path) {
+                    if let Some(repo_states) = state.repo_sidebar_states.get(path) {
+                        self.sidebar_state.branches_expanded = repo_states.branches_expanded;
+                        self.sidebar_state.remotes_expanded = repo_states.remotes_expanded;
+                        self.sidebar_state.tags_expanded = repo_states.tags_expanded;
+                        self.sidebar_state.stashes_expanded = repo_states.stashes_expanded;
+                        self.sidebar_state.prs_expanded = repo_states.prs_expanded;
+                        self.sidebar_state.runs_expanded = repo_states.runs_expanded;
+                        self.sidebar_state.releases_expanded = repo_states.releases_expanded;
+                        self.sidebar_state.packages_expanded = repo_states.packages_expanded;
+                    } else {
+                        // Load defaults
+                        self.sidebar_state.branches_expanded = true;
+                        self.sidebar_state.remotes_expanded = false;
+                        self.sidebar_state.tags_expanded = false;
+                        self.sidebar_state.stashes_expanded = false;
+                        self.sidebar_state.prs_expanded = false;
+                        self.sidebar_state.runs_expanded = false;
+                        self.sidebar_state.releases_expanded = false;
+                        self.sidebar_state.packages_expanded = false;
+                    }
+                    self.sidebar_state.last_loaded_repo_path = Some(path.clone());
+                }
+            } else {
+                self.sidebar_state.last_loaded_repo_path = None;
+            }
+
             let repo_name = self.repo_name();
             let sidebar_action = ui
                 .scope_builder(
@@ -2479,11 +2719,45 @@ impl eframe::App for PalimpsestApp {
                 )
                 .inner;
 
+            // Save repo states to state manager if they changed after rendering
+            if let Some(ref path) = state.current_repo {
+                let current_states = RepoSidebarStates {
+                    branches_expanded: self.sidebar_state.branches_expanded,
+                    remotes_expanded: self.sidebar_state.remotes_expanded,
+                    tags_expanded: self.sidebar_state.tags_expanded,
+                    stashes_expanded: self.sidebar_state.stashes_expanded,
+                    prs_expanded: self.sidebar_state.prs_expanded,
+                    runs_expanded: self.sidebar_state.runs_expanded,
+                    releases_expanded: self.sidebar_state.releases_expanded,
+                    packages_expanded: self.sidebar_state.packages_expanded,
+                };
+                let stored_states = state.repo_sidebar_states.get(path);
+                if stored_states != Some(&current_states) {
+                    self.store.dispatch(AppAction::SetRepoSidebarStates {
+                        repo_path: path.clone(),
+                        states: current_states,
+                    });
+                    self.persist_session();
+                }
+            }
+
             if let Some(action) = sidebar_action {
                 let ctx = ui.ctx().clone();
                 match action {
                     sidebar::SidebarAction::CheckoutBranch(name) => {
                         self.handle_branch_action(BranchAction::Checkout(name), &ctx);
+                    }
+                    sidebar::SidebarAction::CheckoutRemoteBranch {
+                        local_name,
+                        remote_name,
+                    } => {
+                        self.handle_branch_action(
+                            BranchAction::CheckoutRemote {
+                                local_name,
+                                remote_name,
+                            },
+                            &ctx,
+                        );
                     }
                     sidebar::SidebarAction::DeleteBranch(name) => {
                         self.handle_branch_action(BranchAction::Delete(name), &ctx);
@@ -2499,6 +2773,14 @@ impl eframe::App for PalimpsestApp {
                     }
                     sidebar::SidebarAction::OpenUrl(url) => {
                         open_url(&url);
+                    }
+                    sidebar::SidebarAction::Fetch => {
+                        self.handle_quick_launch_action(QuickLaunchAction::Fetch, &ctx);
+                        self.trigger_tracker_refresh();
+                    }
+                    sidebar::SidebarAction::RefreshActions => {
+                        self.store.dispatch(AppAction::SetGitHubLoading(true));
+                        self.trigger_tracker_refresh();
                     }
                 }
             }
@@ -2695,35 +2977,39 @@ impl eframe::App for PalimpsestApp {
                     )));
                     ctx.request_repaint();
 
-                    let mut final_path = std::path::PathBuf::from(&path);
-                    if final_path.is_dir() {
-                        let mut url_trimmed = url.trim_end_matches('/');
-                        if url_trimmed.ends_with(".git") {
-                            url_trimmed = &url_trimmed[..url_trimmed.len() - 4];
-                        }
-                        if let Some(pos) = url_trimmed.rfind('/') {
-                            let repo_name = &url_trimmed[pos + 1..];
-                            if !repo_name.is_empty() {
-                                final_path.push(repo_name);
-                            }
-                        } else if let Some(pos) = url_trimmed.rfind(':') {
-                            let repo_name = &url_trimmed[pos + 1..];
-                            if !repo_name.is_empty() {
-                                final_path.push(repo_name);
-                            }
-                        }
-                    }
+                    let final_path = palimpsest::git::repo::derive_clone_destination(&url, &path);
 
-                    match git2::Repository::clone(&url, &final_path) {
-                        Ok(_) => {
-                            store.dispatch(AppAction::SetRepoError(None));
-                            let mut guard = pending_open.lock().unwrap();
-                            *guard = Some(final_path.to_string_lossy().to_string());
-                            ctx.request_repaint();
+                    let clone_res = std::process::Command::new("git")
+                        .args(["clone", &url, &final_path.to_string_lossy()])
+                        .output();
+
+                    match clone_res {
+                        Ok(output) => {
+                            if output.status.success() {
+                                store.dispatch(AppAction::SetRepoError(None));
+                                let mut guard = pending_open.lock().unwrap();
+                                *guard = Some(final_path.to_string_lossy().to_string());
+                                ctx.request_repaint();
+                            } else {
+                                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                                let err_msg = if stderr.trim().is_empty() {
+                                    format!(
+                                        "git clone exit code: {}",
+                                        output.status.code().unwrap_or(-1)
+                                    )
+                                } else {
+                                    stderr.trim().to_string()
+                                };
+                                store.dispatch(AppAction::SetRepoError(Some(format!(
+                                    "Failed to clone repository: {}",
+                                    err_msg
+                                ))));
+                                ctx.request_repaint();
+                            }
                         }
                         Err(e) => {
                             store.dispatch(AppAction::SetRepoError(Some(format!(
-                                "Failed to clone repository: {}",
+                                "Failed to execute git clone: {}",
                                 e
                             ))));
                             ctx.request_repaint();

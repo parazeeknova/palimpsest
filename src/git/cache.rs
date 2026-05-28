@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug)]
 pub struct BoundedLocalSnapshot {
@@ -213,15 +213,17 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
         )?;
         tx.execute(
             "CREATE TABLE IF NOT EXISTS branches(
-                repo_id INTEGER,
-                name TEXT,
-                is_current INTEGER,
-                is_remote INTEGER,
-                upstream TEXT,
-                tip_hash TEXT,
-                PRIMARY KEY(repo_id, name, is_remote),
-                FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
-            )",
+                 repo_id INTEGER,
+                 name TEXT,
+                 is_current INTEGER,
+                 is_remote INTEGER,
+                 upstream TEXT,
+                 tip_hash TEXT,
+                 ahead INTEGER,
+                 behind INTEGER,
+                 PRIMARY KEY(repo_id, name, is_remote),
+                 FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
+             )",
             [],
         )?;
         tx.execute(
@@ -329,6 +331,35 @@ fn migrate(conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
         }
         tx.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (3, ?)",
+            [now_millis() as i64],
+        )?;
+        tx.commit()?;
+    }
+
+    if current_version < 4 {
+        let tx = conn.unchecked_transaction()?;
+        let mut has_ahead = false;
+        let mut has_behind = false;
+        {
+            let mut stmt = tx.prepare("PRAGMA table_info(branches)")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(1)?;
+                if name == "ahead" {
+                    has_ahead = true;
+                } else if name == "behind" {
+                    has_behind = true;
+                }
+            }
+        }
+        if !has_ahead {
+            tx.execute("ALTER TABLE branches ADD COLUMN ahead INTEGER", [])?;
+        }
+        if !has_behind {
+            tx.execute("ALTER TABLE branches ADD COLUMN behind INTEGER", [])?;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (4, ?)",
             [now_millis() as i64],
         )?;
         tx.commit()?;
@@ -532,8 +563,8 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
         .map_err(|e| e.to_string())?;
     for b in &local.branches {
         tx.execute(
-            "INSERT INTO branches (repo_id, name, is_current, is_remote, upstream, tip_hash)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO branches (repo_id, name, is_current, is_remote, upstream, tip_hash, ahead, behind)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 repo_id,
                 &b.name,
@@ -541,6 +572,8 @@ pub fn save_cache(cache: &DiskCache, auth_login: Option<&str>) -> Result<(), Str
                 if b.is_remote { 1 } else { 0 },
                 &b.upstream,
                 &b.tip_hash,
+                b.ahead.map(|n| n as i64),
+                b.behind.map(|n| n as i64),
             ),
         )
         .map_err(|e| e.to_string())?;
@@ -863,8 +896,8 @@ pub fn save_refs_slice(
         .map_err(|e| e.to_string())?;
     for b in branches {
         tx.execute(
-            "INSERT INTO branches (repo_id, name, is_current, is_remote, upstream, tip_hash)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO branches (repo_id, name, is_current, is_remote, upstream, tip_hash, ahead, behind)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 repo_id,
                 &b.name,
@@ -872,6 +905,8 @@ pub fn save_refs_slice(
                 if b.is_remote { 1 } else { 0 },
                 &b.upstream,
                 &b.tip_hash,
+                b.ahead.map(|n| n as i64),
+                b.behind.map(|n| n as i64),
             ),
         )
         .map_err(|e| e.to_string())?;
@@ -1279,7 +1314,7 @@ pub fn load_cache(repo_path: &str, auth_login: Option<&str>) -> Option<DiskCache
 
     // Load branches
     let mut stmt = match conn.prepare(
-        "SELECT name, is_current, is_remote, upstream, tip_hash
+        "SELECT name, is_current, is_remote, upstream, tip_hash, ahead, behind
          FROM branches WHERE repo_id = ?",
     ) {
         Ok(s) => s,
@@ -1294,19 +1329,23 @@ pub fn load_cache(repo_path: &str, auth_login: Option<&str>) -> Option<DiskCache
                 row.get::<_, i64>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
             ))
         })
         .ok()?;
 
     let mut branches = Vec::new();
     for r in branch_rows.flatten() {
-        let (name, is_current_val, is_remote_val, upstream, tip_hash) = r;
+        let (name, is_current_val, is_remote_val, upstream, tip_hash, ahead_val, behind_val) = r;
         branches.push(Branch {
             name,
             is_current: is_current_val == 1,
             is_remote: is_remote_val == 1,
             upstream,
             tip_hash,
+            ahead: ahead_val.map(|n| n as usize),
+            behind: behind_val.map(|n| n as usize),
         });
     }
 
@@ -1865,6 +1904,8 @@ mod tests {
                 is_remote: false,
                 upstream: None,
                 tip_hash: "1234567".to_string(),
+                ahead: None,
+                behind: None,
             }],
             remotes: vec![Remote {
                 name: "origin".to_string(),
@@ -1934,6 +1975,10 @@ mod tests {
                     conclusion: Some("success".to_string()),
                     html_url: "runurl".to_string(),
                     head_branch: "feature".to_string(),
+                    created_at: "2024-01-01T00:00:00Z".to_string(),
+                    updated_at: "2024-01-01T00:05:00Z".to_string(),
+                    run_number: 16,
+                    actor_login: "user".to_string(),
                 }],
                 releases: vec![GitHubRelease {
                     tag_name: "v1.0.0".to_string(),
@@ -2223,6 +2268,8 @@ mod tests {
                 is_remote: false,
                 upstream: None,
                 tip_hash: "c1".to_string(),
+                ahead: None,
+                behind: None,
             }],
             remotes: vec![],
             tags: vec![Tag {
@@ -2340,6 +2387,8 @@ mod tests {
                 is_remote: false,
                 upstream: None,
                 tip_hash: "c1".to_string(),
+                ahead: None,
+                behind: None,
             },
             Branch {
                 name: "feature-branch".to_string(),
@@ -2347,6 +2396,8 @@ mod tests {
                 is_remote: false,
                 upstream: None,
                 tip_hash: "c2".to_string(),
+                ahead: None,
+                behind: None,
             },
         ];
         let fp_branches = RepoFingerprints {

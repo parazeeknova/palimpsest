@@ -365,6 +365,31 @@ struct GraphData {
     branches: Vec<CachedBranch>,
 }
 
+fn extract_merged_branch_name(message: &str) -> Option<&str> {
+    let first_line = message.lines().next()?;
+
+    if let Some(from_idx) = first_line.find("from ") {
+        let rest = &first_line[from_idx + 5..];
+        let branch_part = rest.lines().next()?.trim();
+        let cleaned = branch_part.trim_matches(|c| c == '\'' || c == '"');
+        if !cleaned.is_empty() {
+            return Some(cleaned);
+        }
+    }
+
+    if let Some(start_idx) = first_line.find("Merge branch '") {
+        let rest = &first_line[start_idx + 14..];
+        if let Some(end_idx) = rest.find('\'') {
+            let branch_name = &rest[..end_idx];
+            if !branch_name.is_empty() {
+                return Some(branch_name);
+            }
+        }
+    }
+
+    None
+}
+
 impl GraphData {
     fn new() -> Self {
         Self {
@@ -406,10 +431,41 @@ impl GraphData {
         commit: &CachedCommit,
         branches: &[CachedBranch],
     ) -> egui::Color32 {
-        let branch_name = branches
+        let matching_branches: Vec<&CachedBranch> = branches
             .iter()
-            .find(|b| b.tip_hash == commit.hash || b.tip_hash == commit.short_hash)
-            .map(|b| b.name.as_str());
+            .filter(|b| b.tip_hash == commit.hash || b.tip_hash == commit.short_hash)
+            .collect();
+
+        let best_branch = matching_branches.iter().min_by_key(|b| {
+            let base_name = b.name.split('/').next_back().unwrap_or(b.name.as_str());
+
+            // Factor 1: Does this base name point to any other commit?
+            let has_other_commit = branches.iter().any(|other| {
+                let other_base = other
+                    .name
+                    .split('/')
+                    .next_back()
+                    .unwrap_or(other.name.as_str());
+                other_base == base_name
+                    && other.tip_hash != commit.hash
+                    && other.tip_hash != commit.short_hash
+            });
+            let score_factor_1: i32 = if has_other_commit { 1 } else { 0 };
+
+            // Factor 2: Is it a primary branch (main/master/trunk)?
+            let is_primary = base_name == "main" || base_name == "master" || base_name == "trunk";
+            let score_factor_2: i32 = if is_primary { -10 } else { 0 };
+
+            // Factor 3: Is it local?
+            let score_factor_3: i32 = if !b.is_remote { -2 } else { 0 };
+
+            // Factor 4: Is it current/checked out?
+            let score_factor_4: i32 = if b.is_current { -1 } else { 0 };
+
+            score_factor_1 + score_factor_2 + score_factor_3 + score_factor_4
+        });
+
+        let branch_name = best_branch.copied().map(|b| b.name.as_str());
 
         if let Some(name) = branch_name {
             let color = crate::ui::colors::get_branch_color(name, branches);
@@ -438,6 +494,7 @@ impl GraphData {
                 .and_then(|lanes| lanes.iter().min().copied());
 
             let commit_lane = commit_lane.unwrap_or_else(|| self.first_empty_lane_idx());
+            let original_lane_color = self.lane_colors.get(&commit_lane).copied();
             let commit_color = self.get_lane_color(commit_lane, commit, branches);
 
             if let Some(lanes) = self.parent_to_lanes.remove(&commit_idx) {
@@ -507,11 +564,21 @@ impl GraphData {
                             .push(commit_lane);
                     } else {
                         let new_lane = self.first_empty_lane_idx();
+                        let mut inherited_color = None;
+                        if let Some(branch_name) = extract_merged_branch_name(&commit.message) {
+                            inherited_color =
+                                Some(crate::ui::colors::get_branch_color(branch_name, branches));
+                        }
+                        let inherited_color = inherited_color.or(original_lane_color);
+
+                        if let Some(color) = inherited_color {
+                            self.lane_colors.insert(new_lane, color);
+                        }
 
                         self.lane_states[new_lane] = LaneState::Active {
                             parent: parent_global_idx,
                             child: commit_idx,
-                            color: None,
+                            color: inherited_color,
                             starting_col: commit_lane,
                             starting_row: commit_row,
                             destination_column: None,
@@ -584,6 +651,7 @@ pub struct State {
     pub drawer_state: commit_drawer::State,
     pub layout: CommitDrawerLayout,
     refs_fingerprint: Option<RefsFingerprint>,
+    pub scroll_to_selected: bool,
 }
 
 impl Default for State {
@@ -611,6 +679,7 @@ impl Default for State {
             drawer_state: commit_drawer::State::default(),
             layout: CommitDrawerLayout::default(),
             refs_fingerprint: None,
+            scroll_to_selected: false,
         }
     }
 }
@@ -905,7 +974,36 @@ pub fn show_cached(
     git_repo: Option<&GitRepo>,
     repo_live_tx: &std::sync::mpsc::Sender<RepoLiveEvent>,
 ) {
+    let active_branch_changed = {
+        let old_active = state
+            .graph_data
+            .branches
+            .iter()
+            .find(|b| b.is_current)
+            .map(|b| &b.name);
+        let new_active = app_state
+            .cached_branches
+            .iter()
+            .find(|b| b.is_current)
+            .map(|b| &b.name);
+        old_active != new_active
+    };
+
+    if active_branch_changed {
+        if let Some(new_branch) = app_state.cached_branches.iter().find(|b| b.is_current) {
+            let commit_match = app_state.cached_commits.iter().find(|c| {
+                c.short_hash == new_branch.tip_hash || c.hash.starts_with(&new_branch.tip_hash)
+            });
+            if let Some(commit) = commit_match {
+                state.selected_commit_hash = Some(commit.hash.clone());
+                state.scroll_to_selected = true;
+                state.drawer_state.tab = commit_drawer::CommitDrawerTab::Commit;
+            }
+        }
+    }
+
     let graph_commits_changed = state.graph_data.commits.len() != app_state.cached_commits.len()
+        || active_branch_changed
         || state
             .graph_data
             .commits
@@ -1523,6 +1621,11 @@ fn paint_rows(
             state.drawer_state.tab = commit_drawer::CommitDrawerTab::Commit;
         }
 
+        if state.scroll_to_selected && is_selected {
+            response.scroll_to_me(Some(egui::Align::Center));
+            state.scroll_to_selected = false;
+        }
+
         if response.hovered() {
             state.hovered_row = Some(row_idx);
         } else if state.hovered_row == Some(row_idx) {
@@ -1777,6 +1880,9 @@ fn paint_ref_badges(
         refs_by_row.entry(row).or_default().push(badge.clone());
     }
 
+    // Deferred chips from the hovered/expanded row so they paint on top of all others.
+    let mut deferred_chips: Vec<(RefBadge, egui::Rect)> = Vec::new();
+
     for (row_idx, mut badges) in refs_by_row {
         let row = row_rect(content_rect, row_idx, has_top_row, ROW_HEIGHT);
         let refs_rect = row.intersect(columns.refs).shrink2(egui::vec2(6.0, 4.0));
@@ -1835,18 +1941,45 @@ fn paint_ref_badges(
         let mut visible_chips = vec![(primary_badge.clone(), primary_rect)];
 
         if is_hovered && badges.len() > 1 {
-            let mut stack_top = primary_rect.top() - 2.0;
-            for badge in badges.iter().skip(1).cloned() {
-                let width = chip_width_for_badge(ui, &badge, refs_rect.width());
-                stack_top -= chip_height + 2.0;
-                visible_chips.push((
-                    badge,
-                    egui::Rect::from_min_size(
-                        egui::pos2(refs_rect.left(), stack_top),
-                        egui::vec2(width, chip_height),
-                    ),
-                ));
+            // For the topmost commit row, expand badges downward to avoid
+            // clipping above the visible area; otherwise expand upward.
+            let expand_down = row_idx == 0;
+            if expand_down {
+                let mut stack_bottom = primary_rect.bottom() + 2.0;
+                for badge in badges.iter().skip(1).cloned() {
+                    let width = chip_width_for_badge(ui, &badge, refs_rect.width());
+                    visible_chips.push((
+                        badge,
+                        egui::Rect::from_min_size(
+                            egui::pos2(refs_rect.left(), stack_bottom),
+                            egui::vec2(width, chip_height),
+                        ),
+                    ));
+                    stack_bottom += chip_height + 2.0;
+                }
+            } else {
+                let mut stack_top = primary_rect.top() - 2.0;
+                for badge in badges.iter().skip(1).cloned() {
+                    let width = chip_width_for_badge(ui, &badge, refs_rect.width());
+                    stack_top -= chip_height + 2.0;
+                    visible_chips.push((
+                        badge,
+                        egui::Rect::from_min_size(
+                            egui::pos2(refs_rect.left(), stack_top),
+                            egui::vec2(width, chip_height),
+                        ),
+                    ));
+                }
             }
+
+            // Defer expanded chips so they paint on top of all other rows.
+            if let Some((badge, chip_rect)) = visible_chips.first() {
+                if badge.connect_to_graph {
+                    paint_ref_connector(ui, columns.graph, *chip_rect, badge, graph_data);
+                }
+            }
+            deferred_chips.extend(visible_chips);
+            continue;
         }
 
         if let Some((badge, chip_rect)) = visible_chips.first() {
@@ -1889,6 +2022,11 @@ fn paint_ref_badges(
                 egui::Align2::CENTER_CENTER,
             );
         }
+    }
+
+    // Paint deferred (hovered/expanded) chips last so they render on top.
+    for (badge, chip_rect) in deferred_chips.into_iter().rev() {
+        paint_ref_chip(ui, chip_rect, &badge, color_for_ref(&badge, graph_data));
     }
 }
 
@@ -1956,9 +2094,19 @@ fn compare_tags_for_display(left: &RefBadge, right: &RefBadge) -> std::cmp::Orde
 fn parsed_tag_version(label: &str) -> Option<(u64, u64, u64)> {
     let stripped = label.strip_prefix('v').unwrap_or(label);
     let mut parts = stripped.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
+
+    let parse_part = |s: &str| -> Option<u64> {
+        let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            None
+        } else {
+            digits.parse().ok()
+        }
+    };
+
+    let major = parse_part(parts.next()?)?;
+    let minor = parse_part(parts.next()?)?;
+    let patch = parse_part(parts.next()?)?;
     if parts.next().is_some() {
         return None;
     }
@@ -2083,7 +2231,6 @@ fn paint_ref_chip(ui: &mut egui::Ui, rect: egui::Rect, badge: &RefBadge, accent:
     );
 
     let icon = match badge.kind {
-        RefKind::Branch if badge.highlighted => CHECK,
         RefKind::Branch => GIT_BRANCH,
         RefKind::Tag => TAG,
         RefKind::Release => BOOKMARK,
@@ -2184,17 +2331,17 @@ fn paint_ref_chip(ui: &mut egui::Ui, rect: egui::Rect, badge: &RefBadge, accent:
     }
 
     if badge.highlighted {
-        let pencil_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.right() - 10.0, rect.center().y - 4.0),
+        let check_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 12.0, rect.center().y - 4.0),
             egui::vec2(8.0, 8.0),
         );
         clipped_text(
             ui,
-            pencil_rect,
-            pencil_rect.center(),
-            PENCIL_SIMPLE,
-            7.0,
-            accent,
+            check_rect,
+            check_rect.center(),
+            CHECK,
+            8.0,
+            egui::Color32::from_rgb(46, 204, 113), // Premium emerald green checkmark
             egui::Align2::CENTER_CENTER,
         );
     }
@@ -2839,6 +2986,8 @@ mod tests {
         assert_eq!(parsed_tag_version("v1.2.3"), Some((1, 2, 3)));
         assert_eq!(parsed_tag_version("1.2.3"), Some((1, 2, 3)));
         assert_eq!(parsed_tag_version("v1.2"), None);
+        assert_eq!(parsed_tag_version("v0.0.29-beta"), Some((0, 0, 29)));
+        assert_eq!(parsed_tag_version("0.0.29.rc1"), None);
     }
 
     #[test]

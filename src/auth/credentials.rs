@@ -15,6 +15,7 @@ pub struct StoredCredentials {
     pub github_user: Option<super::github_oauth::GitHubUser>,
     pub git_name: Option<String>,
     pub git_email: Option<String>,
+    pub git_ssh_passphrase: Option<String>,
     pub setup_completed: bool,
 }
 
@@ -316,6 +317,97 @@ pub fn clear_github_auth(credentials: &mut StoredCredentials, persist: bool) {
     }
 }
 
+pub fn load_credentials_result() -> Result<StoredCredentials, String> {
+    let Some(path) = credentials_path() else {
+        return Err("Unable to resolve credentials directory".to_string());
+    };
+
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StoredCredentials::default());
+        }
+        Err(e) => return Err(format!("Failed to read credentials file: {e}")),
+    };
+
+    if let Ok(payload) = serde_json::from_str::<EncryptedPayload>(&contents) {
+        let key_res = match payload.key_source.as_str() {
+            "keyring" => get_or_create_keyring_key().map_err(|e| e.to_string()),
+            _ => Ok(derive_machine_key()),
+        };
+
+        let key = match key_res {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load encryption key from keyring, trying derived fallback");
+                derive_machine_key()
+            }
+        };
+
+        let iv_bytes = match hex_decode(&payload.iv) {
+            Some(iv) if iv.len() == 12 => {
+                let mut a = [0u8; 12];
+                a.copy_from_slice(&iv);
+                a
+            }
+            _ => return Err("Invalid IV length in credentials file".to_string()),
+        };
+
+        let ct_bytes = match hex_decode(&payload.encrypted_data) {
+            Some(ct) => ct,
+            _ => return Err("Invalid hex in encrypted credentials data".to_string()),
+        };
+
+        let pt = decrypt_data(&key, &iv_bytes, &ct_bytes)
+            .map_err(|e| format!("Failed to decrypt credentials: {e}"))?;
+        let mut credentials: StoredCredentials = serde_json::from_slice(&pt)
+            .map_err(|e| format!("Failed to deserialize decrypted credentials: {e}"))?;
+
+        if let Some(ref tok) = credentials.github_token {
+            if tok == "keyring" {
+                match load_token_from_keyring() {
+                    Ok(t) => credentials.github_token = Some(t),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Failed to load token from legacy keyring entry");
+                        credentials.github_token = None;
+                    }
+                }
+            }
+        }
+        Ok(credentials)
+    } else {
+        let mut credentials: StoredCredentials = serde_json::from_str(&contents)
+            .map_err(|e| format!("Failed to parse legacy credentials file: {e}"))?;
+
+        if let Some(ref tok) = credentials.github_token {
+            if tok == "keyring" {
+                match load_token_from_keyring() {
+                    Ok(t) => credentials.github_token = Some(t),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Failed to load token from legacy keyring entry");
+                        credentials.github_token = None;
+                    }
+                }
+            } else if tok.starts_with("obfuscated:") {
+                let hex_str = tok.trim_start_matches("obfuscated:");
+                credentials.github_token = legacy_deobfuscate(hex_str);
+            }
+        }
+        if let Err(e) = save_credentials(&credentials) {
+            tracing::warn!(error = %e, "Failed to migrate credentials to encrypted format");
+        } else {
+            tracing::info!("Successfully migrated legacy credentials to encrypted format");
+        }
+        Ok(credentials)
+    }
+}
+
+pub fn save_git_ssh_passphrase(passphrase: Option<String>) -> Result<(), String> {
+    let mut credentials = load_credentials_result()?;
+    credentials.git_ssh_passphrase = passphrase;
+    save_credentials(&credentials)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +439,7 @@ mod tests {
             github_user: None,
             git_name: Some("Test User".into()),
             git_email: Some("test@example.com".into()),
+            git_ssh_passphrase: None,
             setup_completed: true,
         };
         let serialized = serde_json::to_string(&credentials).expect("serialization should succeed");
@@ -369,6 +462,7 @@ mod tests {
             }),
             git_name: Some("Test".into()),
             git_email: Some("test@example.com".into()),
+            git_ssh_passphrase: None,
             setup_completed: true,
         };
         clear_github_auth(&mut credentials, false);
